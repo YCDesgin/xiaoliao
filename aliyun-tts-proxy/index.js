@@ -171,6 +171,17 @@ const VOICE_LABELS = {
 };
 
 // --- FC HTTP 触发器入口 ---
+// 路由策略（兼容不同 FC 版本对子路径的转发差异）：
+//   GET /?text=xxx&voice=cally&rate=-25%   返回 audio/mpeg  ← 主入口（根路径 + query）
+//   GET /tts?text=xxx                       兼容旧子路径路由
+//   GET /voices 或 /?action=voices          返回英文发音人列表
+// 采用「根路径 + query」为主，避免部分 FC 版本不转发子路径导致 404。
+function getQueryValue(qs, key) {
+  const v = qs[key];
+  if (Array.isArray(v)) return v.length ? v[0] : undefined;
+  return v;
+}
+
 module.exports.handler = async function (event, context, callback) {
   let e = event;
   if (typeof event === 'string') {
@@ -185,19 +196,32 @@ module.exports.handler = async function (event, context, callback) {
     (e.requestContext && e.requestContext.http && e.requestContext.http.method) ||
     'GET'
   ).toUpperCase();
-  const qs = e.queryString || e.queryParameters || {};
-  const path = e.path || e.requestURI || '/';
+
+  // FC 的 query 字段可能是数组（queryParameters: { text: ['hello'] }），统一取首值
+  const rawQs = e.queryString || e.queryStringParameters || e.queryParameters || {};
+  const qs = {};
+  for (const k of Object.keys(rawQs)) qs[k] = getQueryValue(rawQs, k);
+
+  // path 兼容多种字段：rawPath / path / requestURI(去 query)
+  const path =
+    e.rawPath ||
+    e.path ||
+    (typeof e.requestURI === 'string' ? e.requestURI.split('?')[0] : '') ||
+    '/';
 
   if (method === 'OPTIONS') {
     return send(callback, 204, {}, '');
   }
 
-  if (path.endsWith('/voices')) {
+  // 发音人列表
+  const action = qs.action;
+  if (action === 'voices' || path.endsWith('/voices')) {
     const voices = KNOWN_EN_VOICES.map((v) => ({ name: v, label: VOICE_LABELS[v] || v }));
     return send(callback, 200, { 'Content-Type': 'application/json' }, JSON.stringify(voices));
   }
 
-  if (path.endsWith('/tts')) {
+  // TTS：子路径 /tts 或根路径带 text 参数
+  if (path.endsWith('/tts') || (path === '/' && qs.text)) {
     const text = qs.text || '';
     if (!text || !text.trim()) {
       return send(callback, 400, { 'Content-Type': 'application/json' }, JSON.stringify({ error: '缺少 text 参数' }));

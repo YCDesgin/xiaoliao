@@ -236,7 +236,10 @@ export async function cloudTtsSpeak(text, voiceName, rate) {
   try {
     let res;
     try {
-      res = await fetch(`${cloudUrl}/tts?${params}`, { signal: AbortSignal.timeout(15000) });
+      // 代理支持根路径 + query（主）与 /tts 子路径（兼容）。优先用根路径，
+      // 因为部分 FC 版本对子路径转发不一致，根路径最稳定。
+      const sep = cloudUrl.includes('?') ? '&' : '?';
+      res = await fetch(`${cloudUrl}${sep}${params}`, { signal: AbortSignal.timeout(15000) });
     } catch (e) {
       // Network error / Worker unreachable — report AND throw so speakText() can
       // fall back to the browser TTS engine instead of going silent.
