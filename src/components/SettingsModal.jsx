@@ -1,13 +1,42 @@
 import { useState, useRef } from 'react';
 
+// Edge-TTS voice options for the "AI 语音" dropdown.
+const VOICE_OPTIONS = [
+  { value: 'en-US-JennyNeural', label: 'Jenny (美式女声)' },
+  { value: 'en-US-GuyNeural', label: 'Guy (美式男声)' },
+  { value: 'en-GB-SoniaNeural', label: 'Sonia (英式女声)' },
+  { value: 'en-AU-NatashaNeural', label: 'Natasha (澳式女声)' },
+];
+
 export default function SettingsModal({ apiKey, userAvatar, onSave, onSaveAvatar, onClose }) {
   // Fallback to an empty string so the input never becomes an uncontrolled
   // (null/undefined) field and `key.trim()` below can never throw.
   const [key, setKey] = useState(apiKey || '');
   const [saved, setSaved] = useState(false);
+  // Cloud TTS Worker URL (empty = not configured). Read once on open, using the
+  // same localStorage key as getCloudTtsUrl() in services/speech.js.
+  const [cloudUrl, setCloudUrl] = useState(
+    () => localStorage.getItem('speakup_cloud_tts_url') || '',
+  );
+  // Preferred AI voice; default to Jenny so the dropdown always has a value.
+  const [preferredVoice, setPreferredVoice] = useState(
+    localStorage.getItem('speakup_preferred_voice') || 'en-US-JennyNeural',
+  );
   const fileRef = useRef(null);
 
-  const handleSave = () => { onSave((key || '').trim()); setSaved(true); setTimeout(() => setSaved(false), 1500); };
+  const handleSave = () => {
+    onSave((key || '').trim());
+    // Persist cloud TTS URL (clears storage when empty) — identical logic to
+    // setCloudTtsUrl() in services/speech.js, kept local so this component has
+    // no dependency on the (partially-mocked) speech service in tests.
+    const trimmedUrl = (cloudUrl || '').trim();
+    if (trimmedUrl) localStorage.setItem('speakup_cloud_tts_url', trimmedUrl);
+    else localStorage.removeItem('speakup_cloud_tts_url');
+    // Persist preferred AI voice.
+    localStorage.setItem('speakup_preferred_voice', preferredVoice || 'en-US-JennyNeural');
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1500);
+  };
 
   const handleAvatarClick = () => fileRef.current?.click();
 
@@ -80,6 +109,25 @@ export default function SettingsModal({ apiKey, userAvatar, onSave, onSaveAvatar
               请先填写 API Key 再保存，否则对话、语音与复盘功能将无法使用。
             </p>
           )}
+        </div>
+
+        {/* Cloud TTS address */}
+        <div className="mt-5">
+          <label className="block text-xs text-[#707579] mb-1.5">云端 TTS 地址</label>
+          <input type="url" value={cloudUrl} onChange={e => setCloudUrl(e.target.value)} placeholder="https://xiaoliao-tts.xxx.workers.dev"
+            className="w-full bg-[#0e1621] border border-[#1c2a3a] rounded-xl px-3 py-2.5 text-sm text-[#f5f5f5] placeholder-[#5a6a7a] focus:outline-none focus:border-[#2aabee] transition-colors" />
+          <p className="text-[11px] text-[#5a6a7a] mt-1.5">部署 Cloudflare Worker 后填入，手机可听 AI 语音</p>
+        </div>
+
+        {/* AI voice selection */}
+        <div className="mt-4">
+          <label className="block text-xs text-[#707579] mb-1.5">AI 语音</label>
+          <select value={preferredVoice} onChange={e => setPreferredVoice(e.target.value)}
+            className="w-full bg-[#0e1621] border border-[#1c2a3a] rounded-xl px-3 py-2.5 text-sm text-[#f5f5f5] focus:outline-none focus:border-[#2aabee] transition-colors">
+            {VOICE_OPTIONS.map(o => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
         </div>
 
         <div className="flex gap-3 mt-5">

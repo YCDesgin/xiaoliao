@@ -23,6 +23,23 @@ export function getTtsMode() {
   return localStorage.getItem('speakup_tts_mode') || (isLocalEnv() ? 'edgetts' : 'browser');
 }
 
+// --- Cloud TTS (Cloudflare Worker proxying Edge-TTS) ---
+// When a cloud TTS Worker URL is configured, AI voices are fetched from it as
+// an mp3 stream. This is what makes the app audible on public (GitHub Pages)
+// deployments and on Chinese Android phones without Google Mobile Services.
+
+export function getCloudTtsUrl() {
+  return localStorage.getItem('speakup_cloud_tts_url') || '';
+}
+
+export function setCloudTtsUrl(url) {
+  if (url && url.trim()) {
+    localStorage.setItem('speakup_cloud_tts_url', url.trim());
+  } else {
+    localStorage.removeItem('speakup_cloud_tts_url');
+  }
+}
+
 // --- Edge-TTS ---
 
 const EDGETTS_URL = 'http://localhost:5100';
@@ -79,6 +96,54 @@ async function edgeTtsSpeak(text, voiceName, rate) {
       if (currentAudio === audio) currentAudio = null;
       resolve();
     });
+  });
+}
+
+/**
+ * Cloud TTS playback. Fetches a synthesized mp3 from the configured Cloudflare
+ * Worker and plays it through an <audio> element (same cancel/play lifecycle
+ * as edgeTtsSpeak). The Worker URL is read from localStorage via getCloudTtsUrl.
+ *
+ * @param {string} text - Text to speak
+ * @param {string} voiceName - Edge-TTS voice name (e.g. en-US-JennyNeural)
+ * @param {number} rate - Speed as a float multiplier (e.g. 0.75 → "-25%")
+ */
+export async function cloudTtsSpeak(text, voiceName, rate) {
+  // Cancel any currently playing audio immediately.
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio.src = '';
+    currentAudio.load();
+    currentAudio = null;
+    speaking = false;
+  }
+
+  const cloudUrl = getCloudTtsUrl();
+  const params = new URLSearchParams({ text });
+  if (voiceName) params.set('voice', voiceName);
+  if (rate !== undefined) {
+    const pct = Math.round((rate - 1) * 100);
+    params.set('rate', `${pct >= 0 ? '+' : ''}${pct}%`);
+  }
+
+  const res = await fetch(`${cloudUrl}/tts?${params}`, { signal: AbortSignal.timeout(15000) });
+  if (!res.ok) throw new Error(`Cloud TTS error: ${res.status}`);
+
+  const blob = await res.blob();
+  const audioUrl = URL.createObjectURL(blob);
+  const audio = new Audio(audioUrl);
+  currentAudio = audio;
+
+  return new Promise((resolve) => {
+    const cleanup = () => {
+      URL.revokeObjectURL(audioUrl);
+      speaking = false;
+      if (currentAudio === audio) currentAudio = null;
+    };
+    audio.onended = () => { cleanup(); resolve(); };
+    audio.onerror = () => { cleanup(); resolve(); };
+    speaking = true;
+    audio.play().catch(() => { cleanup(); resolve(); });
   });
 }
 
@@ -338,6 +403,22 @@ export async function speakText(text, opts = {}) {
   const voiceName = opts.voice || localStorage.getItem('speakup_preferred_voice') || '';
   const mode = opts.mode || getTtsMode();
   const speed = opts.rate || getSpeechRate();
+
+  // --- Cloud TTS priority ---
+  // If a cloud TTS Worker URL is configured, always prefer it. This is what
+  // makes AI voices audible on public (GitHub Pages) deployments and on
+  // Chinese Android phones without Google Mobile Services, where the browser
+  // speechSynthesis engine has no usable English voice.
+  const cloudUrl = getCloudTtsUrl();
+  if (cloudUrl) {
+    try {
+      await cloudTtsSpeak(text, voiceName || 'en-US-JennyNeural', speed);
+      return;
+    } catch (e) {
+      console.warn('Cloud TTS failed, falling back to local/default engine:', e?.message || e);
+      // Do NOT change the global TTS mode — only fall back for this single call.
+    }
+  }
 
   // On public (non-localhost) deployments the Edge-TTS local server is
   // unreachable, so go straight to browser TTS instead of failing a fetch.
