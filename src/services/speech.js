@@ -74,26 +74,29 @@ async function edgeTtsSpeak(text, voiceName, rate) {
   const blob = await res.blob();
   const audioUrl = URL.createObjectURL(blob);
   const audio = new Audio(audioUrl);
+  // Mount to DOM: detached Audio elements are blocked by mobile autoplay
+  // policies even after a user gesture (play() runs after the fetch callback).
+  audio.style.cssText = 'position:absolute;left:-9999px;opacity:0;pointer-events:none;width:1px;height:1px;';
+  document.body.appendChild(audio);
   currentAudio = audio;
 
   return new Promise((resolve) => {
-    audio.onended = () => {
+    const cleanup = () => {
       URL.revokeObjectURL(audioUrl);
       speaking = false;
       if (currentAudio === audio) currentAudio = null;
-      resolve();
+      if (audio.parentNode) audio.parentNode.removeChild(audio);
     };
-    audio.onerror = () => {
-      URL.revokeObjectURL(audioUrl);
-      speaking = false;
-      if (currentAudio === audio) currentAudio = null;
+    audio.onended = () => { cleanup(); resolve(); };
+    audio.onerror = (e) => {
+      console.error('Edge-TTS audio error:', e);
+      cleanup();
       resolve();
     };
     speaking = true;
-    audio.play().catch(() => {
-      URL.revokeObjectURL(audioUrl);
-      speaking = false;
-      if (currentAudio === audio) currentAudio = null;
+    audio.play().catch((e) => {
+      console.error('Edge-TTS play() blocked:', e);
+      cleanup();
       resolve();
     });
   });
@@ -132,6 +135,10 @@ export async function cloudTtsSpeak(text, voiceName, rate) {
   const blob = await res.blob();
   const audioUrl = URL.createObjectURL(blob);
   const audio = new Audio(audioUrl);
+  // Mount to DOM so mobile autoplay policies don't silently block playback
+  // (play() runs after await fetch, outside the original user gesture).
+  audio.style.cssText = 'position:absolute;left:-9999px;opacity:0;pointer-events:none;width:1px;height:1px;';
+  document.body.appendChild(audio);
   currentAudio = audio;
 
   return new Promise((resolve) => {
@@ -139,11 +146,20 @@ export async function cloudTtsSpeak(text, voiceName, rate) {
       URL.revokeObjectURL(audioUrl);
       speaking = false;
       if (currentAudio === audio) currentAudio = null;
+      if (audio.parentNode) audio.parentNode.removeChild(audio);
     };
     audio.onended = () => { cleanup(); resolve(); };
-    audio.onerror = () => { cleanup(); resolve(); };
+    audio.onerror = (e) => {
+      console.error('Cloud TTS audio error:', e);
+      cleanup();
+      resolve();
+    };
     speaking = true;
-    audio.play().catch(() => { cleanup(); resolve(); });
+    audio.play().catch((e) => {
+      console.error('Cloud TTS play() blocked:', e);
+      cleanup();
+      resolve();
+    });
   });
 }
 
@@ -342,9 +358,25 @@ export function playAudioBlob(blob) {
     if (!blob) { resolve(); return; }
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
-    audio.onended = () => { URL.revokeObjectURL(url); resolve(); };
-    audio.onerror = () => { URL.revokeObjectURL(url); resolve(); };
-    audio.play().catch(() => { URL.revokeObjectURL(url); resolve(); });
+    // Mount to DOM to satisfy mobile autoplay policies (same fix as cloud/edge TTS).
+    audio.style.cssText = 'position:absolute;left:-9999px;opacity:0;pointer-events:none;width:1px;height:1px;';
+    document.body.appendChild(audio);
+
+    const cleanup = () => {
+      URL.revokeObjectURL(url);
+      if (audio.parentNode) audio.parentNode.removeChild(audio);
+    };
+    audio.onended = () => { cleanup(); resolve(); };
+    audio.onerror = (e) => {
+      console.error('playAudioBlob audio error:', e);
+      cleanup();
+      resolve();
+    };
+    audio.play().catch((e) => {
+      console.error('playAudioBlob play() blocked:', e);
+      cleanup();
+      resolve();
+    });
   });
 }
 
