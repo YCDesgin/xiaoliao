@@ -52,10 +52,8 @@ export default function App() {
   const [splash, setSplash] = useState(true);
   const [splashFade, setSplashFade] = useState(false);
 
-  const DEFAULT_API_KEY = 'sk-fd4f743a009e4683862807e1431af57f';
-
   const [apiKey, setApiKey] = useState(() => {
-    return localStorage.getItem('speakup_gemini_key') || DEFAULT_API_KEY;
+    return localStorage.getItem('speakup_gemini_key') || '';
   });
 
   const saveApiKey = useCallback((key) => {

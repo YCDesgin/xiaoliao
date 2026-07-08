@@ -1,11 +1,13 @@
 import { useState, useRef } from 'react';
 
 export default function SettingsModal({ apiKey, userAvatar, onSave, onSaveAvatar, onClose }) {
-  const [key, setKey] = useState(apiKey);
+  // Fallback to an empty string so the input never becomes an uncontrolled
+  // (null/undefined) field and `key.trim()` below can never throw.
+  const [key, setKey] = useState(apiKey || '');
   const [saved, setSaved] = useState(false);
   const fileRef = useRef(null);
 
-  const handleSave = () => { onSave(key.trim()); setSaved(true); setTimeout(() => setSaved(false), 1500); };
+  const handleSave = () => { onSave((key || '').trim()); setSaved(true); setTimeout(() => setSaved(false), 1500); };
 
   const handleAvatarClick = () => fileRef.current?.click();
 
@@ -73,6 +75,11 @@ export default function SettingsModal({ apiKey, userAvatar, onSave, onSaveAvatar
           <label className="block text-xs text-[#707579] mb-1.5">DeepSeek API Key</label>
           <input type="password" value={key} onChange={e => setKey(e.target.value)} placeholder="sk-..."
             className="w-full bg-[#0e1621] border border-[#1c2a3a] rounded-xl px-3 py-2.5 text-sm text-[#f5f5f5] placeholder-[#5a6a7a] focus:outline-none focus:border-[#2aabee] transition-colors" />
+          {!key && (
+            <p className="text-[11px] text-[#e67e22] mt-1.5">
+              请先填写 API Key 再保存，否则对话、语音与复盘功能将无法使用。
+            </p>
+          )}
         </div>
 
         <div className="flex gap-3 mt-5">
