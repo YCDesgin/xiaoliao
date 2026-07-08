@@ -541,19 +541,17 @@ export async function speakText(text, opts = {}) {
   const mode = opts.mode || getTtsMode();
   const speed = opts.rate || getSpeechRate();
 
-  // --- Cloud TTS priority ---
-  // If a cloud TTS Worker URL is configured, always prefer it. This is what
-  // makes AI voices audible on public (GitHub Pages) deployments and on
-  // Chinese Android phones without Google Mobile Services, where the browser
-  // speechSynthesis engine has no usable English voice.
-  const cloudUrl = getCloudTtsUrl();
-  if (cloudUrl) {
+  // --- 方案 C：浏览器内置语音为主路径 ---
+  // 云端 TTS（Cloudflare Worker）在国内网络无法访问（workers.dev 被拦截，
+  // 报 ERR_CONNECTION_RESET），因此默认直接走浏览器 speechSynthesis
+  // （零服务器、零翻墙、国内直接可用）。仅当用户在设置里显式选择"云端模式"
+  // 且已配置 Worker 地址时才走云端。
+  if (mode === 'cloud' && getCloudTtsUrl()) {
     try {
       await cloudTtsSpeak(text, voiceName || 'en-US-JennyNeural', speed);
       return;
     } catch (e) {
-      console.warn('Cloud TTS failed, falling back to local/default engine:', e?.message || e);
-      // Do NOT change the global TTS mode — only fall back for this single call.
+      console.warn('Cloud TTS failed, falling back to browser TTS:', e?.message || e);
     }
   }
 
@@ -578,33 +576,82 @@ export async function speakText(text, opts = {}) {
   browserSpeak(text, { ...opts, voice: voiceName, rate: speed });
 }
 
+// Speak text with the browser's built-in SpeechSynthesis engine.
+// Robust for mobile: handles async voice loading, avoids the cancel-then-speak
+// "first word dropped" bug, and splits long text into chunks to dodge the
+// ~15s per-utterance cap on mobile browsers.
 function browserSpeak(text, opts = {}) {
-  return new Promise((resolve) => {
-    if (!window.speechSynthesis) {
-      console.warn('Speech synthesis not supported');
-      resolve();
-      return;
-    }
+  if (!window.speechSynthesis) {
+    console.warn('Speech synthesis not supported');
+    return;
+  }
+  // Cancel anything currently playing before enqueuing new utterances.
+  window.speechSynthesis.cancel();
+  const lang = opts.lang || 'en-US';
+  const rate = opts.rate || 1.0;
+  const preferred = opts.voice || '';
 
-    window.speechSynthesis.cancel();
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = opts.lang || 'en-US';
-    utterance.rate = opts.rate || 1.0;
-    utterance.pitch = opts.pitch || 1.0;
-
-    // Pick best available voice
-    const voices = window.speechSynthesis.getVoices();
-    const selectedVoice = pickBestVoice(voices, opts.voice);
-    if (selectedVoice) utterance.voice = selectedVoice;
-
+  const speakChunks = (voices) => {
+    const selected = pickBestVoice(voices, preferred);
+    const chunks = splitIntoChunks(text);
+    let index = 0;
+    const speakNext = () => {
+      if (index >= chunks.length) { speaking = false; return; }
+      const chunk = chunks[index++];
+      if (!chunk.trim()) { speakNext(); return; }
+      const u = new SpeechSynthesisUtterance(chunk);
+      u.lang = lang;
+      u.rate = rate;
+      u.pitch = opts.pitch || 1.0;
+      if (selected) u.voice = selected;
+      u.onend = () => { if (index >= chunks.length) speaking = false; speakNext(); };
+      u.onerror = () => { if (index >= chunks.length) speaking = false; speakNext(); };
+      window.speechSynthesis.speak(u);
+    };
     speaking = true;
+    speakNext();
+  };
 
-    utterance.onend = () => { speaking = false; resolve(); };
-    utterance.onerror = () => { speaking = false; resolve(); };
+  // Voices load asynchronously on most browsers (getVoices() is empty until the
+  // 'voiceschanged' event fires). Wait for them before speaking so we actually
+  // pick a usable English voice instead of a silent default.
+  const voices = window.speechSynthesis.getVoices();
+  if (voices && voices.length > 0) {
+    speakChunks(voices);
+  } else {
+    const onVoicesChanged = () => {
+      window.speechSynthesis.removeEventListener('voiceschanged', onVoicesChanged);
+      speakChunks(window.speechSynthesis.getVoices());
+    };
+    window.speechSynthesis.addEventListener('voiceschanged', onVoicesChanged);
+    // Safety fallback: if the event never fires, try after a short delay.
+    setTimeout(() => {
+      const v = window.speechSynthesis.getVoices();
+      if (v && v.length > 0) {
+        window.speechSynthesis.removeEventListener('voiceschanged', onVoicesChanged);
+        speakChunks(v);
+      } else {
+        // No voices available at all — speak with the default engine anyway.
+        speakChunks([]);
+      }
+    }, 400);
+  }
+}
 
-    window.speechSynthesis.speak(utterance);
-  });
+// Split long text into chunks small enough to avoid the mobile ~15s utterance cap.
+function splitIntoChunks(text, maxLen = 180) {
+  const sentences = text.match(/[^.!?。！？]+[.!?。！？]*/g) || [text];
+  const chunks = [];
+  let current = '';
+  for (const s of sentences) {
+    if ((current + s).length > maxLen && current) {
+      chunks.push(current.trim());
+      current = '';
+    }
+    current += s;
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks.length ? chunks : [text];
 }
 
 function pickBestVoice(voices, preferredVoiceName) {
