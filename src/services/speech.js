@@ -5,6 +5,19 @@ let recognition = null;
 let speaking = false;
 let currentAudio = null;  // Track currently playing HTML <audio> element so we can cancel it
 let currentSource = null; // Track currently playing Web Audio BufferSource so we can cancel it
+
+// --- Centralized TTS error reporting ---
+// Lets the app layer hook in a user-visible error reporter (e.g. a toast).
+// Without a handler, errors are still logged to the console via reportTtsError.
+let ttsErrorHandler = null;
+export function setTtsErrorHandler(fn) {
+  if (typeof fn === 'function') ttsErrorHandler = fn;
+}
+function reportTtsError(msg) {
+  console.error('[XiaLiao TTS] ' + msg);
+  if (ttsErrorHandler) { try { ttsErrorHandler(msg); } catch {} }
+}
+
 let ttsMode = 'browser'; // 'browser' | 'edgetts'
 
 // --- Web Audio API playback (mobile-safe) ---
@@ -54,14 +67,33 @@ async function playArrayBuffer(arrayBuffer) {
     // caller fall back to the HTML <audio> element instead of going silent.
     if (ctx.state === 'suspended') throw new Error('AudioContext still suspended after resume');
   }
-  const audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
+  // Decode with callback form for max compatibility (Safari/older browsers
+  // do NOT return a Promise from decodeAudioData — they only support callbacks).
+  const audioBuffer = await new Promise((resolve, reject) => {
+    try {
+      const p = ctx.decodeAudioData(arrayBuffer.slice(0), resolve, reject);
+      if (p && typeof p.then === 'function') p.then(resolve, reject);
+    } catch (e) { reject(e); }
+  });
   const source = ctx.createBufferSource();
   source.buffer = audioBuffer;
   source.connect(ctx.destination);
   currentSource = source;
+  // Safety net: resolve even if onended never fires (avoids a forever-pending
+  // Promise that would leave the app stuck in the "speaking" state).
+  const safetyMs = Math.max(500, Math.ceil(audioBuffer.duration * 1000) + 800);
   await new Promise((resolve) => {
-    source.onended = () => { if (currentSource === source) currentSource = null; resolve(); };
-    source.start(0);
+    let done = false;
+    const finish = () => {
+      if (!done) {
+        done = true;
+        if (currentSource === source) currentSource = null;
+        resolve();
+      }
+    };
+    source.onended = finish;
+    setTimeout(finish, safetyMs);
+    try { source.start(0); } catch (e) { finish(); }
   });
 }
 
@@ -154,7 +186,13 @@ async function edgeTtsSpeak(text, voiceName, rate) {
   if (voiceName) url.searchParams.set('voice', voiceName);
   if (rate) url.searchParams.set('rate', rate);
 
-  const res = await fetch(url.toString(), { signal: AbortSignal.timeout(3000) });
+  let res;
+  try {
+    res = await fetch(url.toString(), { signal: AbortSignal.timeout(3000) });
+  } catch (e) {
+    reportTtsError('Edge-TTS 请求失败（本地服务不可达）: ' + (e?.message || e));
+    throw e;
+  }
   if (!res.ok) throw new Error('Edge-TTS server error');
 
   const blob = await res.blob();
@@ -181,7 +219,7 @@ async function edgeTtsSpeak(text, voiceName, rate) {
  */
 export async function cloudTtsSpeak(text, voiceName, rate) {
   const cloudUrl = getCloudTtsUrl();
-  if (!cloudUrl) return;
+  if (!cloudUrl) { reportTtsError('未配置云端 TTS 地址'); return; }
 
   // Cancel any currently playing audio immediately.
   stopCurrentPlayback();
@@ -196,18 +234,42 @@ export async function cloudTtsSpeak(text, voiceName, rate) {
 
   speaking = true;
   try {
-    const res = await fetch(`${cloudUrl}/tts?${params}`, { signal: AbortSignal.timeout(15000) });
-    if (!res.ok) throw new Error(`Cloud TTS error: ${res.status}`);
-
+    let res;
+    try {
+      res = await fetch(`${cloudUrl}/tts?${params}`, { signal: AbortSignal.timeout(15000) });
+    } catch (e) {
+      // Network error / Worker unreachable — report AND throw so speakText() can
+      // fall back to the browser TTS engine instead of going silent.
+      reportTtsError('请求云端 TTS 失败（网络/Worker 不可达）: ' + (e?.message || e));
+      throw e;
+    }
+    if (!res.ok) {
+      // Worker returned an error status (e.g. 500 / timeout) — report AND throw.
+      reportTtsError(`云端 TTS 返回错误状态 ${res.status}`);
+      throw new Error(`Cloud TTS error: ${res.status}`);
+    }
     const blob = await res.blob();
+    if (!blob || blob.size === 0) {
+      // Worker returned an empty body — report AND throw.
+      reportTtsError('云端 TTS 返回空音频');
+      throw new Error('Cloud TTS returned empty audio');
+    }
     const arrayBuffer = await blob.arrayBuffer();
     try {
       await playArrayBuffer(arrayBuffer); // Web Audio main path (mobile-safe)
     } catch (e) {
-      console.warn('Web Audio playback failed, falling back to HTMLAudio:', e);
-      await playViaHtmlAudio(URL.createObjectURL(blob)); // fallback
+      // Web Audio decode/play failed — fall back to plain <audio> element.
+      console.warn('Web Audio 播放失败，回退到 <audio>:', e);
+      try {
+        await playViaHtmlAudio(URL.createObjectURL(blob)); // fallback
+      } catch (e2) {
+        reportTtsError('回退播放也失败: ' + (e2?.message || e2));
+      }
     }
   } catch (e) {
+    // Network / status / empty-audio errors above were already reported via
+    // reportTtsError before being thrown; only log the throw here so the stack
+    // is visible in devtools. speakText()'s catch will fall back to browser TTS.
     console.error('Cloud TTS playback error:', e);
   } finally {
     speaking = false;
