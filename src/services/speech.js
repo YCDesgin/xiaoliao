@@ -389,6 +389,11 @@ export function stopRecording() {
     let recorderStopped = false;
     let recognitionStopped = !recognition;
     let resolved = false;
+    let cloudTranscript = '';
+
+    // 云端识别模式：无原生 SpeechRecognition，但有云端 ASR 地址（华为等无 GMS 设备）。
+    // 此时 recognition 为 null，录音停止后把音频上传云端识别拿文本。
+    const useCloud = !recognition && !!getCloudTtsUrl();
 
     const tryResolve = () => {
       if (resolved || !recorderStopped || !recognitionStopped) return;
@@ -408,9 +413,10 @@ export function stopRecording() {
         recordingStream = null;
       }
 
-      // Use final results; fall back to the last known (final + interim) text
-      // so a message is never dropped even if the final event is late/missing.
-      const transcript = finalTranscript.trim() || lastTranscript.trim();
+      // 云端模式取云端 ASR 文本；原生模式取 final/interim 文本（含兜底）
+      const transcript = useCloud
+        ? (cloudTranscript || '').trim()
+        : (finalTranscript.trim() || lastTranscript.trim());
       if (recordingResolve) {
         recordingResolve({ transcript, audioBlob });
         recordingResolve = null;
@@ -418,12 +424,12 @@ export function stopRecording() {
       resolve({ transcript, audioBlob });
     };
 
-    // Safety net: don't wait more than 3 seconds for recognition to finalize
+    // 安全超时：原生模式等 recognition 收尾（3s）；云端模式等上传+识别（15s）
     const safetyTimeout = setTimeout(() => {
       recorderStopped = true;
       recognitionStopped = true;
       tryResolve();
-    }, 3000);
+    }, useCloud ? 15000 : 3000);
 
     // --- Stop speech recognition and capture its final result ---
     if (recognition) {
@@ -454,7 +460,14 @@ export function stopRecording() {
           ? new Blob(audioChunks, { type: 'audio/webm' })
           : null;
         recorderStopped = true;
-        tryResolve();
+        if (useCloud && audioBlob) {
+          // 无原生识别：上传音频到云端 ASR 拿文本
+          cloudAsr(audioBlob)
+            .then((t) => { cloudTranscript = t; tryResolve(); })
+            .catch((e) => { console.error('云端 ASR 失败:', e); cloudTranscript = ''; tryResolve(); });
+        } else {
+          tryResolve();
+        }
       };
       mediaRecorder.stop();
     } else {
@@ -742,3 +755,81 @@ export const SPEED_PRESETS = [
   { value: 0.85, label: '中速 (进阶)' },
   { value: 1.0, label: '正常语速' },
 ];
+
+// --- 云端语音识别 (ASR) ---
+// 当设备无原生 SpeechRecognition（如华为无 GMS），前端把录音解码后重采样为
+// 16k/16bit/单声道 PCM WAV，POST 到云端代理（阿里云一句话识别）换取文本。
+// 这样华为等国内手机无需 Google 引擎也能发起语音输入。
+
+// 重采样到 16k 单声道（语音场景取第一声道足够），线性插值
+function resampleToMono16k(audioBuffer) {
+  const srcRate = audioBuffer.sampleRate;
+  const srcData = audioBuffer.getChannelData(0);
+  const targetRate = 16000;
+  const newLen = Math.max(1, Math.round((srcData.length * targetRate) / srcRate));
+  const out = new Float32Array(newLen);
+  for (let i = 0; i < newLen; i++) {
+    const idx = (i * srcRate) / targetRate;
+    const i0 = Math.floor(idx);
+    const i1 = Math.min(i0 + 1, srcData.length - 1);
+    const frac = idx - i0;
+    out[i] = srcData[i0] * (1 - frac) + srcData[i1] * frac;
+  }
+  return out;
+}
+
+// 把 Float32 PCM 编码成 16-bit WAV (RIFF) 二进制
+function encodeWav(samples, sampleRate) {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+  const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);          // PCM
+  view.setUint16(22, 1, true);          // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); // byte rate
+  view.setUint16(32, 2, true);          // block align
+  view.setUint16(34, 16, true);         // bits per sample
+  writeStr(36, 'data');
+  view.setUint32(40, samples.length * 2, true);
+  let off = 44;
+  for (let i = 0; i < samples.length; i++) {
+    let s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    off += 2;
+  }
+  return new Uint8Array(buffer);
+}
+
+export async function cloudAsr(audioBlob) {
+  const cloudUrl = getCloudTtsUrl();
+  if (!cloudUrl) return '';
+  const arrayBuffer = await audioBlob.arrayBuffer();
+  const ctx = getAudioContext();
+  if (!ctx) throw new Error('Web Audio 不可用，无法转码音频');
+  const audioBuf = await ctx.decodeAudioData(arrayBuffer.slice(0));
+  const mono = resampleToMono16k(audioBuf);
+  const wav = encodeWav(mono, 16000);
+  const sep = cloudUrl.includes('?') ? '&' : '?';
+  const res = await fetch(`${cloudUrl}${sep}action=asr`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'audio/wav' },
+    body: wav,
+  });
+  if (!res.ok) {
+    let msg = `ASR 请求失败 (HTTP ${res.status})`;
+    try { const j = await res.json(); if (j.error) msg = j.error; } catch {}
+    throw new Error(msg);
+  }
+  const json = await res.json();
+  return json.result || '';
+}
+
+// 是否支持语音输入：原生 SpeechRecognition 可用，或已配置云端 ASR 地址
+export function supportsVoiceInput() {
+  return supportsSpeechRecognition() || !!getCloudTtsUrl();
+}

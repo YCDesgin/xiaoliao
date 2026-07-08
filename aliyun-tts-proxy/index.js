@@ -2,12 +2,14 @@
 // 零依赖：仅使用 Node.js 内置模块 (https / crypto / url)，可直接粘贴到阿里云
 // 函数计算 (FC) 控制台，无需 npm install。
 //
-// 作用：作为虾聊的"云端 TTS"地址。接口兼容原 Cloudflare Worker：
-//   GET /tts?text=...&voice=...&rate=...   返回 audio/mpeg 二进制
-//   GET /voices                      返回可用英文发音人列表 (JSON)
+// 作用：作为虾聊的"云端语音"代理，同时提供 TTS（语音合成）与 ASR（语音识别）：
+//   GET  /?text=xxx&voice=cally&rate=-25%   返回 audio/mpeg 二进制（TTS 语音合成）
+//   GET  /?action=voices                    返回可用英文发音人列表 (JSON)
+//   POST /?action=asr  (body=wav 16k mono)  返回 { result: "识别出的文本" }（ASR 语音识别）
 //
 // 部署后，把 FC 触发器的 URL 填到虾聊「设置 → 云端 TTS 地址」即可。
-// 国内的函数计算域名可直连，华为手机也能听到自然英文发音。
+// 国内的函数计算域名可直连，华为手机也能听到自然英文发音、并发起语音输入
+// （华为无 GMS，浏览器原生 SpeechRecognition 不可用，故识别也走云端）。
 
 const https = require('https');
 const crypto = require('crypto');
@@ -121,6 +123,62 @@ async function synthesizeChunk(text, voice, speechRate) {
   throw new Error(msg);
 }
 
+// --- 通用 HTTPS POST（发送二进制 body，用于 ASR 音频上传）---
+function httpsPostBuffer(urlStr, bodyBuffer, contentType, timeoutMs = 30000) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      urlStr,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': contentType,
+          'Content-Length': bodyBuffer.length,
+        },
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () =>
+          resolve({
+            status: res.statusCode,
+            contentType: res.headers['content-type'] || '',
+            body: Buffer.concat(chunks),
+          })
+        );
+      }
+    );
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('请求超时')));
+    req.write(bodyBuffer);
+    req.end();
+  });
+}
+
+// --- 阿里云「一句话识别」：上传 wav(16k, 16bit, mono) 返回识别文本 ---
+async function recognizeChunk(wavBuffer) {
+  const token = await getToken();
+  const q = new URLSearchParams();
+  q.set('appkey', APPKEY);
+  q.set('token', token);
+  q.set('format', 'wav');
+  q.set('sample_rate', '16000');
+  q.set('enable_punctuation', 'true');
+  const url = `https://${GATEWAY_HOST}/recognize?${q.toString()}`;
+  const res = await httpsPostBuffer(url, wavBuffer, 'application/octet-stream', 30000);
+
+  let data;
+  try {
+    data = JSON.parse(res.body.toString('utf8'));
+  } catch (e) {
+    throw new Error('ASR 响应解析失败');
+  }
+  // 阿里云一句话识别：status=20000000 表示成功
+  if (data.status !== 20000000) {
+    throw new Error('ASR 失败: status=' + data.status + ' msg=' + (data.message || ''));
+  }
+  return data.result || '';
+}
+
 // --- 长文本按词切分（每段 ≤ max 字符，阿里云单次上限 300）---
 function splitText(text, max = 280) {
   const words = text.split(/\s+/);
@@ -148,7 +206,7 @@ function toAliyunRate(speed) {
 function corsHeaders() {
   return {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, X-Requested-With',
   };
 }
@@ -289,6 +347,39 @@ module.exports.handler = async function (event, context, callback) {
         audio.toString('base64'),
         true
       );
+    } catch (err) {
+      return send(
+        callback,
+        500,
+        { 'Content-Type': 'application/json' },
+        JSON.stringify({ error: err.message || String(err) })
+      );
+    }
+  }
+
+  // ASR：子路径 /recognize 或根路径 POST + action=asr
+  // 前端（无 Google 引擎的华为手机）把录音转成 wav(16k,16bit,mono) 后 POST 上来
+  if (method === 'POST' && (path.endsWith('/recognize') || action === 'asr')) {
+    const rawBody = e.body;
+    if (rawBody == null) {
+      return send(callback, 400, { 'Content-Type': 'application/json' }, JSON.stringify({ error: '缺少音频数据' }));
+    }
+    let bodyBuf;
+    if (typeof rawBody === 'string') {
+      bodyBuf = e.isBase64Encoded || e.bodyEncoding === 'base64'
+        ? Buffer.from(rawBody, 'base64')
+        : Buffer.from(rawBody, 'utf8');
+    } else if (Buffer.isBuffer(rawBody)) {
+      bodyBuf = rawBody;
+    } else {
+      bodyBuf = Buffer.from(String(rawBody));
+    }
+    if (!bodyBuf || bodyBuf.length === 0) {
+      return send(callback, 400, { 'Content-Type': 'application/json' }, JSON.stringify({ error: '音频为空' }));
+    }
+    try {
+      const text = await recognizeChunk(bodyBuf);
+      return send(callback, 200, { 'Content-Type': 'application/json' }, JSON.stringify({ result: text }));
     } catch (err) {
       return send(
         callback,

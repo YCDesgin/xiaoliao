@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback } from 'react';
-import { startRecording, stopRecording, supportsSpeechRecognition } from '../services/speech';
+import { startRecording, stopRecording, supportsVoiceInput } from '../services/speech';
 
 export default function MessageInput({ onSend, disabled }) {
   const [text, setText] = useState('');
@@ -7,7 +7,7 @@ export default function MessageInput({ onSend, disabled }) {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [showTextInput, setShowTextInput] = useState(false);
   const recordingRef = useRef(false);
-  const canRecord = supportsSpeechRecognition();
+  const canRecord = supportsVoiceInput();
 
   const handleMicClick = useCallback(async () => {
     if (!canRecord || disabled) return;
