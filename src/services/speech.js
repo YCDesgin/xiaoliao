@@ -42,21 +42,26 @@ function getAudioContext() {
 
 // Play raw audio bytes through the Web Audio API. Does not require play() to be
 // inside the user-gesture call stack, making it reliable on mobile browsers.
-function playArrayBuffer(arrayBuffer) {
-  return new Promise((resolve, reject) => {
-    const ctx = getAudioContext();
-    if (!ctx) { reject(new Error('Web Audio API unavailable')); return; }
-    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
-    ctx.decodeAudioData(arrayBuffer.slice(0))
-      .then((audioBuffer) => {
-        const source = ctx.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(ctx.destination);
-        currentSource = source;
-        source.onended = () => { if (currentSource === source) currentSource = null; resolve(); };
-        source.start(0);
-      })
-      .catch((e) => reject(e));
+// IMPORTANT: the AudioContext MUST be resumed (and actually 'running') before
+// source.start(), otherwise the buffer is scheduled on a suspended context and
+// produces NO sound and NO error — silently breaking all playback.
+async function playArrayBuffer(arrayBuffer) {
+  const ctx = getAudioContext();
+  if (!ctx) throw new Error('Web Audio API unavailable');
+  if (ctx.state === 'suspended') {
+    try { await ctx.resume(); } catch (e) { /* fall through to the check below */ }
+    // If still suspended after resume (autoplay policy blocked it), let the
+    // caller fall back to the HTML <audio> element instead of going silent.
+    if (ctx.state === 'suspended') throw new Error('AudioContext still suspended after resume');
+  }
+  const audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
+  const source = ctx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(ctx.destination);
+  currentSource = source;
+  await new Promise((resolve) => {
+    source.onended = () => { if (currentSource === source) currentSource = null; resolve(); };
+    source.start(0);
   });
 }
 
