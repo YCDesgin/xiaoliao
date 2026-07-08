@@ -176,38 +176,75 @@ const VOICE_LABELS = {
 //   GET /tts?text=xxx                       兼容旧子路径路由
 //   GET /voices 或 /?action=voices          返回英文发音人列表
 // 采用「根路径 + query」为主，避免部分 FC 版本不转发子路径导致 404。
-function getQueryValue(qs, key) {
-  const v = qs[key];
-  if (Array.isArray(v)) return v.length ? v[0] : undefined;
-  return v;
+// 兼容多种 FC 版本的 query 字段来源，并支持 rawQueryString 兜底解析
+function collectQuery(e) {
+  const qs = {};
+  const objQs =
+    e.queryString ||
+    e.queryStringParameters ||
+    e.queryParameters ||
+    (e.requestContext && e.requestContext.http && e.requestContext.http.queries) ||
+    {};
+  for (const k of Object.keys(objQs)) {
+    let v = objQs[k];
+    if (Array.isArray(v)) v = v[0];
+    qs[k] = v;
+  }
+  // 原始查询串兜底（部分 FC 版本仅提供 rawQueryString）
+  if (e.rawQueryString) {
+    for (const pair of String(e.rawQueryString).split('&')) {
+      if (!pair) continue;
+      const idx = pair.indexOf('=');
+      const k = decodeURIComponent(pair.slice(0, idx < 0 ? pair.length : idx));
+      const v = decodeURIComponent(pair.slice(idx < 0 ? pair.length : idx + 1).replace(/\+/g, ' '));
+      if (!(k in qs)) qs[k] = v;
+    }
+  }
+  return qs;
+}
+
+// 兼容多种 FC 版本的 path 字段来源
+function collectPath(e) {
+  return (
+    e.rawPath ||
+    (e.requestContext && e.requestContext.http && e.requestContext.http.path) ||
+    e.path ||
+    (typeof e.requestURI === 'string' ? e.requestURI.split('?')[0] : '') ||
+    '/'
+  );
 }
 
 module.exports.handler = async function (event, context, callback) {
   let e = event;
-  if (typeof event === 'string') {
+  // FC HTTP 触发器可能把 event 作为 Buffer 传入（而非字符串/对象），需先转字符串再 JSON.parse
+  if (Buffer.isBuffer(e)) {
+    e = e.toString('utf8');
+  }
+  if (typeof e === 'string') {
     try {
-      e = JSON.parse(event);
+      e = JSON.parse(e);
     } catch (err) {
       e = {};
     }
   }
+  const qs = collectQuery(e);
+  const path = collectPath(e);
+
+  // 调试开关：?__debug=1 返回真实 event 结构，便于排查 FC 字段差异
+  if (qs.__debug || qs.debug) {
+    return send(
+      callback,
+      200,
+      { 'Content-Type': 'application/json' },
+      JSON.stringify({ rawPath: path, queryKeys: Object.keys(qs), event: e }, null, 2)
+    );
+  }
+
   const method = (
     e.httpMethod ||
     (e.requestContext && e.requestContext.http && e.requestContext.http.method) ||
     'GET'
   ).toUpperCase();
-
-  // FC 的 query 字段可能是数组（queryParameters: { text: ['hello'] }），统一取首值
-  const rawQs = e.queryString || e.queryStringParameters || e.queryParameters || {};
-  const qs = {};
-  for (const k of Object.keys(rawQs)) qs[k] = getQueryValue(rawQs, k);
-
-  // path 兼容多种字段：rawPath / path / requestURI(去 query)
-  const path =
-    e.rawPath ||
-    e.path ||
-    (typeof e.requestURI === 'string' ? e.requestURI.split('?')[0] : '') ||
-    '/';
 
   if (method === 'OPTIONS') {
     return send(callback, 204, {}, '');
@@ -262,5 +299,19 @@ module.exports.handler = async function (event, context, callback) {
     }
   }
 
-  return send(callback, 404, { 'Content-Type': 'application/json' }, JSON.stringify({ error: 'Not Found' }));
+  // 兜底诊断：返回完整 event 结构（脱敏）以便定位 FC 字段差异
+  const safeEvent = {};
+  for (const k of Object.keys(e)) {
+    const v = e[k];
+    if (typeof v === 'string' && v.length > 200) { safeEvent[k] = v.slice(0, 200) + '...(truncated)'; }
+    else if (typeof v === 'object' && v !== null) {
+      try { safeEvent[k] = JSON.stringify(v).slice(0, 500); } catch (_) { safeEvent[k] = '[circular/unserializable]'; }
+    } else { safeEvent[k] = v; }
+  }
+  return send(
+    callback,
+    404,
+    { 'Content-Type': 'application/json' },
+    JSON.stringify({ error: 'Not Found', _diag: { rawPath: path, queryKeys: Object.keys(qs), envRegion: REGION, eventKeys: Object.keys(e), eventPreview: safeEvent } })
+  );
 };
