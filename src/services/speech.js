@@ -3,8 +3,94 @@
 
 let recognition = null;
 let speaking = false;
-let currentAudio = null;  // Track currently playing Audio element so we can cancel it
+let currentAudio = null;  // Track currently playing HTML <audio> element so we can cancel it
+let currentSource = null; // Track currently playing Web Audio BufferSource so we can cancel it
 let ttsMode = 'browser'; // 'browser' | 'edgetts'
+
+// --- Web Audio API playback (mobile-safe) ---
+// Mobile browsers enforce a stricter autoplay policy than desktop: audio.play()
+// must run inside the user-gesture call stack, or the page must have unlocked an
+// AudioContext via a prior gesture. Because our TTS flow awaits a fetch before
+// playback, play() lands outside the gesture and is silently blocked on phones
+// (desktop Chrome's "sticky activation" is more lenient, so desktop still works).
+// Web Audio playback via decodeAudioData + AudioBufferSourceNode does NOT require
+// play() to be inside the gesture, so we unlock the AudioContext on first gesture
+// and use it for all synthesized audio.
+
+let audioCtx = null;
+function getAudioContext() {
+  if (!audioCtx) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (Ctx) {
+      try { audioCtx = new Ctx(); } catch (e) { audioCtx = null; }
+    }
+  }
+  return audioCtx;
+}
+
+// Mobile autoplay policy: unlock (resume) the AudioContext on the first user gesture.
+(function setupAudioUnlock() {
+  if (typeof document === 'undefined') return;
+  const unlock = () => {
+    const ctx = getAudioContext();
+    if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
+  };
+  ['touchend', 'click', 'keydown'].forEach((ev) =>
+    document.addEventListener(ev, unlock, { passive: true })
+  );
+})();
+
+// Play raw audio bytes through the Web Audio API. Does not require play() to be
+// inside the user-gesture call stack, making it reliable on mobile browsers.
+function playArrayBuffer(arrayBuffer) {
+  return new Promise((resolve, reject) => {
+    const ctx = getAudioContext();
+    if (!ctx) { reject(new Error('Web Audio API unavailable')); return; }
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    ctx.decodeAudioData(arrayBuffer.slice(0))
+      .then((audioBuffer) => {
+        const source = ctx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(ctx.destination);
+        currentSource = source;
+        source.onended = () => { if (currentSource === source) currentSource = null; resolve(); };
+        source.start(0);
+      })
+      .catch((e) => reject(e));
+  });
+}
+
+// HTML <audio> fallback for the rare environment without Web Audio support.
+function playViaHtmlAudio(audioUrl) {
+  return new Promise((resolve) => {
+    const audio = new Audio(audioUrl);
+    audio.style.cssText = 'position:absolute;left:-9999px;opacity:0;pointer-events:none;width:1px;height:1px;';
+    if (typeof document !== 'undefined' && document.body) document.body.appendChild(audio);
+    currentAudio = audio;
+    const cleanup = () => {
+      if (currentAudio === audio) currentAudio = null;
+      if (audio.parentNode) audio.parentNode.removeChild(audio);
+      URL.revokeObjectURL(audioUrl);
+    };
+    audio.onended = () => { cleanup(); resolve(); };
+    audio.onerror = (e) => { console.error('HTMLAudio fallback error:', e); cleanup(); resolve(); };
+    audio.play().catch((e) => { console.error('HTMLAudio fallback play blocked:', e); cleanup(); resolve(); });
+  });
+}
+
+// Stop any in-progress playback (both Web Audio and HTML <audio> fallback).
+function stopCurrentPlayback() {
+  if (currentSource) {
+    try { currentSource.stop(); } catch {}
+    currentSource = null;
+  }
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio.src = '';
+    currentAudio.load();
+    currentAudio = null;
+  }
+}
 
 // Returns true when running on a local dev machine (where the Edge-TTS
 // Python server at http://localhost:5100 is expected to be reachable).
@@ -55,13 +141,8 @@ export async function testEdgeTtsConnection() {
 
 async function edgeTtsSpeak(text, voiceName, rate) {
   // Cancel any currently playing audio immediately
-  if (currentAudio) {
-    currentAudio.pause();
-    currentAudio.src = '';
-    currentAudio.load();
-    currentAudio = null;
-    speaking = false;
-  }
+  stopCurrentPlayback();
+  speaking = false;
 
   const url = new URL(`${EDGETTS_URL}/speak`);
   url.searchParams.set('text', text);
@@ -72,34 +153,16 @@ async function edgeTtsSpeak(text, voiceName, rate) {
   if (!res.ok) throw new Error('Edge-TTS server error');
 
   const blob = await res.blob();
-  const audioUrl = URL.createObjectURL(blob);
-  const audio = new Audio(audioUrl);
-  // Mount to DOM: detached Audio elements are blocked by mobile autoplay
-  // policies even after a user gesture (play() runs after the fetch callback).
-  audio.style.cssText = 'position:absolute;left:-9999px;opacity:0;pointer-events:none;width:1px;height:1px;';
-  document.body.appendChild(audio);
-  currentAudio = audio;
-
-  return new Promise((resolve) => {
-    const cleanup = () => {
-      URL.revokeObjectURL(audioUrl);
-      speaking = false;
-      if (currentAudio === audio) currentAudio = null;
-      if (audio.parentNode) audio.parentNode.removeChild(audio);
-    };
-    audio.onended = () => { cleanup(); resolve(); };
-    audio.onerror = (e) => {
-      console.error('Edge-TTS audio error:', e);
-      cleanup();
-      resolve();
-    };
-    speaking = true;
-    audio.play().catch((e) => {
-      console.error('Edge-TTS play() blocked:', e);
-      cleanup();
-      resolve();
-    });
-  });
+  const arrayBuffer = await blob.arrayBuffer();
+  speaking = true;
+  try {
+    await playArrayBuffer(arrayBuffer); // Web Audio main path (mobile-safe)
+  } catch (e) {
+    console.warn('Web Audio playback failed, falling back to HTMLAudio:', e);
+    await playViaHtmlAudio(URL.createObjectURL(blob)); // fallback
+  } finally {
+    speaking = false;
+  }
 }
 
 /**
@@ -112,16 +175,13 @@ async function edgeTtsSpeak(text, voiceName, rate) {
  * @param {number} rate - Speed as a float multiplier (e.g. 0.75 → "-25%")
  */
 export async function cloudTtsSpeak(text, voiceName, rate) {
-  // Cancel any currently playing audio immediately.
-  if (currentAudio) {
-    currentAudio.pause();
-    currentAudio.src = '';
-    currentAudio.load();
-    currentAudio = null;
-    speaking = false;
-  }
-
   const cloudUrl = getCloudTtsUrl();
+  if (!cloudUrl) return;
+
+  // Cancel any currently playing audio immediately.
+  stopCurrentPlayback();
+  speaking = false;
+
   const params = new URLSearchParams({ text });
   if (voiceName) params.set('voice', voiceName);
   if (rate !== undefined) {
@@ -129,38 +189,24 @@ export async function cloudTtsSpeak(text, voiceName, rate) {
     params.set('rate', `${pct >= 0 ? '+' : ''}${pct}%`);
   }
 
-  const res = await fetch(`${cloudUrl}/tts?${params}`, { signal: AbortSignal.timeout(15000) });
-  if (!res.ok) throw new Error(`Cloud TTS error: ${res.status}`);
+  speaking = true;
+  try {
+    const res = await fetch(`${cloudUrl}/tts?${params}`, { signal: AbortSignal.timeout(15000) });
+    if (!res.ok) throw new Error(`Cloud TTS error: ${res.status}`);
 
-  const blob = await res.blob();
-  const audioUrl = URL.createObjectURL(blob);
-  const audio = new Audio(audioUrl);
-  // Mount to DOM so mobile autoplay policies don't silently block playback
-  // (play() runs after await fetch, outside the original user gesture).
-  audio.style.cssText = 'position:absolute;left:-9999px;opacity:0;pointer-events:none;width:1px;height:1px;';
-  document.body.appendChild(audio);
-  currentAudio = audio;
-
-  return new Promise((resolve) => {
-    const cleanup = () => {
-      URL.revokeObjectURL(audioUrl);
-      speaking = false;
-      if (currentAudio === audio) currentAudio = null;
-      if (audio.parentNode) audio.parentNode.removeChild(audio);
-    };
-    audio.onended = () => { cleanup(); resolve(); };
-    audio.onerror = (e) => {
-      console.error('Cloud TTS audio error:', e);
-      cleanup();
-      resolve();
-    };
-    speaking = true;
-    audio.play().catch((e) => {
-      console.error('Cloud TTS play() blocked:', e);
-      cleanup();
-      resolve();
-    });
-  });
+    const blob = await res.blob();
+    const arrayBuffer = await blob.arrayBuffer();
+    try {
+      await playArrayBuffer(arrayBuffer); // Web Audio main path (mobile-safe)
+    } catch (e) {
+      console.warn('Web Audio playback failed, falling back to HTMLAudio:', e);
+      await playViaHtmlAudio(URL.createObjectURL(blob)); // fallback
+    }
+  } catch (e) {
+    console.error('Cloud TTS playback error:', e);
+  } finally {
+    speaking = false;
+  }
 }
 
 // --- Speech Recognition + Audio Recording ---
@@ -356,27 +402,19 @@ export function stopRecording() {
 export function playAudioBlob(blob) {
   return new Promise((resolve) => {
     if (!blob) { resolve(); return; }
-    const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-    // Mount to DOM to satisfy mobile autoplay policies (same fix as cloud/edge TTS).
-    audio.style.cssText = 'position:absolute;left:-9999px;opacity:0;pointer-events:none;width:1px;height:1px;';
-    document.body.appendChild(audio);
-
-    const cleanup = () => {
-      URL.revokeObjectURL(url);
-      if (audio.parentNode) audio.parentNode.removeChild(audio);
-    };
-    audio.onended = () => { cleanup(); resolve(); };
-    audio.onerror = (e) => {
-      console.error('playAudioBlob audio error:', e);
-      cleanup();
-      resolve();
-    };
-    audio.play().catch((e) => {
-      console.error('playAudioBlob play() blocked:', e);
-      cleanup();
-      resolve();
-    });
+    blob.arrayBuffer()
+      .then((arrayBuffer) => {
+        // Try Web Audio first (mobile-safe); fall back to HTML <audio> on failure.
+        return playArrayBuffer(arrayBuffer).catch((e) => {
+          console.warn('Web Audio playback failed, falling back to HTMLAudio:', e);
+          return playViaHtmlAudio(URL.createObjectURL(blob));
+        });
+      })
+      .then(() => resolve())
+      .catch((e) => {
+        console.error('playAudioBlob error:', e);
+        resolve();
+      });
   });
 }
 
@@ -546,7 +584,12 @@ export function getEnglishVoices() {
 }
 
 export function stopSpeaking() {
-  // Stop Edge-TTS audio if playing
+  // Stop Web Audio playback if playing
+  if (currentSource) {
+    try { currentSource.stop(); } catch {}
+    currentSource = null;
+  }
+  // Stop HTML <audio> playback if playing
   if (currentAudio) {
     currentAudio.pause();
     currentAudio.src = '';
