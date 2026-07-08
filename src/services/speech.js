@@ -541,17 +541,18 @@ export async function speakText(text, opts = {}) {
   const mode = opts.mode || getTtsMode();
   const speed = opts.rate || getSpeechRate();
 
-  // --- 方案 C：浏览器内置语音为主路径 ---
-  // 云端 TTS（Cloudflare Worker）在国内网络无法访问（workers.dev 被拦截，
-  // 报 ERR_CONNECTION_RESET），因此默认直接走浏览器 speechSynthesis
-  // （零服务器、零翻墙、国内直接可用）。仅当用户在设置里显式选择"云端模式"
-  // 且已配置 Worker 地址时才走云端。
-  if (mode === 'cloud' && getCloudTtsUrl()) {
+  // --- 云端 TTS 优先（只要配置了可用的云端地址）---
+  // 云端 TTS（如阿里云语音合成代理）提供自然的英文神经语音，且国内可直连，
+  // 是华为等无 GMS 手机听到自然英文发音的唯一可靠路径。用户在设置里填了
+  // "云端 TTS 地址"就优先走云端；任何失败（网络/服务错误）都自动回退到
+  // 浏览器语音，绝不会静音。
+  const cloudUrl = getCloudTtsUrl();
+  if (cloudUrl) {
     try {
       await cloudTtsSpeak(text, voiceName || 'en-US-JennyNeural', speed);
       return;
     } catch (e) {
-      console.warn('Cloud TTS failed, falling back to browser TTS:', e?.message || e);
+      console.warn('Cloud TTS 失败，回退到浏览器语音:', e?.message || e);
     }
   }
 

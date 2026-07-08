@@ -1,0 +1,7 @@
+{
+  "name": "xiaoliao-aliyun-tts-proxy",
+  "version": "1.0.0",
+  "description": "虾聊云端TTS代理：阿里云语音合成（零依赖，部署到阿里云函数计算 FC）",
+  "main": "index.js",
+  "handler": "index.handler"
+}
