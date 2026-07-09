@@ -525,6 +525,10 @@ export function stopRecording() {
 
     // 安全超时：原生模式等 recognition 收尾（3s）；云端模式等上传+识别（15s）
     const safetyTimeout = setTimeout(() => {
+      // 云端模式超时兜底：给红字提示，绝不再静默消失
+      if (useCloud && !resolved) {
+        reportAsrError('语音识别超时，请重试');
+      }
       recorderStopped = true;
       recognitionStopped = true;
       tryResolve();
@@ -1165,9 +1169,16 @@ async function cloudStopAndEncode() {
     try {
       if (mediaRecorder.state === 'recording') {
         await new Promise((resolve) => {
-          mediaRecorder.onstop = () => resolve();
-          try { mediaRecorder.stop(); } catch { resolve(); }
+          let done = false;
+          const finish = () => { if (!done) { done = true; resolve(); } };
+          mediaRecorder.onstop = finish;
+          // 2 秒超时：安卓上 extendable-media-recorder 的 onstop 可能不触发，
+          // 超时后继续往下处理已通过 ondataavailable 收集到的 audioChunks。
+          setTimeout(finish, 2000);
+          try { mediaRecorder.stop(); } catch { finish(); }
         });
+      } else {
+        console.warn('[ASR诊断] 停止时 mediaRecorder.state=', mediaRecorder.state, '（可能 start 失败或已停止）');
       }
     } catch {
       /* 停止失败也无妨，已采集到的块仍可用 */
@@ -1193,18 +1204,33 @@ async function cloudStopAndEncode() {
     const audioBlob = new Blob(audioChunks, { type: mimeType });
     audioChunks = [];
     try {
-      const arrayBuffer = await audioBlob.arrayBuffer();
+      // arrayBuffer() 一般很快，但保险起见加 5 秒超时
+      const arrayBuffer = await Promise.race([
+        audioBlob.arrayBuffer(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('arrayBuffer 超时')), 5000)),
+      ]);
       const ctx = getAudioContext();
-      if (!ctx) return null;
-      const audioBuf = await ctx.decodeAudioData(arrayBuffer.slice(0));
+      if (!ctx) {
+        console.warn('[ASR诊断] AudioContext 不可用，无法解码音频');
+        return null;
+      }
+      // decodeAudioData 在某些移动端可能 pending 不返回，包 5 秒超时
+      const audioBuf = await Promise.race([
+        ctx.decodeAudioData(arrayBuffer.slice(0)),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('decodeAudioData 超时')), 5000)),
+      ]);
       const mono = resampleToMono16k(audioBuf.getChannelData(0), audioBuf.sampleRate);
       return encodeWav(mono, 16000);
     } catch (e) {
-      console.warn('云端音频解码失败:', e);
+      console.warn('[ASR诊断] 音频解码失败:', e?.message || e, 'mimeType=', mimeType);
       return null;
     }
   }
 
+  // 到这里说明 pcmChunks 和 audioChunks 都为空：没有采集到任何音频数据
+  if (pcmChunks.length === 0 && audioChunks.length === 0) {
+    console.warn('[ASR诊断] 没有采集到任何音频数据（ondataavailable 未触发，可能麦克风被占用或浏览器不支持录音）');
+  }
   return null;
 }
 
