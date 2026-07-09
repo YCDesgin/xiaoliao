@@ -1,6 +1,15 @@
 // Speech service: Web Speech API (free) + optional Edge-TTS (natural voices)
 // Edge-TTS provides much more natural English voices via a local Python server
 
+// AudioWorklet processor that captures mono Float32 PCM from the mic (mobile-safe,
+// unlike ScriptProcessorNode whose callback is unreliable on Android Chrome/Huawei).
+// The processor source lives at src/services/pcm-recorder-worklet.js; the DEPLOYED copy
+// is public/pcm-recorder-worklet.js, which Vite copies verbatim into the build output
+// root. We reference it via import.meta.env.BASE_URL so the URL resolves correctly even
+// under the GitHub Pages /xiaoliao/ subpath (a plain `?url`/`new URL` import of a .js
+// file is silently bundled, never emitted as a fetchable asset — which would 404).
+const workletUrl = `${import.meta.env.BASE_URL}pcm-recorder-worklet.js`;
+
 let recognition = null;
 let speaking = false;
 let currentAudio = null;  // Track currently playing HTML <audio> element so we can cancel it
@@ -934,11 +943,52 @@ function classifyAsrError(e) {
   return msg || '语音识别失败，请重试';
 }
 
-// 云端模式采集：用 ScriptProcessor 实时抓取单声道 Float32 PCM。
-// 注意：必须把节点连到 destination（本实现经 0 增益节点静音，避免麦克风回声）
-// 才会触发 onaudioprocess。
-// 若 AudioContext / createScriptProcessor 不可用（极少），回退到 MediaRecorder + decodeAudioData 旧逻辑。
+// 云端模式采集：优先用 AudioWorklet 实时抓取单声道 Float32 PCM（移动端可靠，
+// 不会像 ScriptProcessor 那样在安卓 Chrome/华为上不触发回调 → 产出空 WAV 静默失败）。
+// 三层兜底：AudioWorklet → ScriptProcessor → MediaRecorder。
 async function setupCloudCapture(stream) {
+  const ctx = getAudioContext();
+  if (!ctx) {
+    console.warn('AudioContext 不可用，回退到 MediaRecorder 兜底');
+    fallbackToMediaRecorder(stream);
+    return;
+  }
+  if (ctx.state === 'suspended') {
+    try { await ctx.resume(); } catch {}
+  }
+  try {
+    // AudioWorklet 不可用（极旧浏览器）则降级
+    if (!ctx.audioWorklet) throw new Error('no audioWorklet');
+    // 加载 worklet 处理器模块（Vite 通过 ?url 把文件作为静态资源引入）
+    await ctx.audioWorklet.addModule(workletUrl);
+    const node = new AudioWorkletNode(ctx, 'pcm-recorder', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+    });
+    pcmChunks = [];
+    pcmSampleRate = ctx.sampleRate;
+    node.port.onmessage = (e) => {
+      if (e.data && e.data.length) pcmChunks.push(Float32Array.from(e.data));
+    };
+    const source = ctx.createMediaStreamSource(stream);
+    // 经 0 增益连到 destination：既保证 worklet 持续被音频线程拉取运行，又避免麦克风回声
+    const mute = ctx.createGain();
+    mute.gain.value = 0;
+    source.connect(node);
+    node.connect(mute);
+    mute.connect(ctx.destination);
+    cloudNode = node;
+    cloudSource = source;
+  } catch (err) {
+    console.warn('AudioWorklet 不可用，回退 ScriptProcessor', err);
+    fallbackToScriptProcessor(stream);
+  }
+}
+
+// 兜底第一层：AudioWorklet 不可用时的 ScriptProcessor PCM 采集（原逻辑）。
+// 必须把节点连到 destination（本实现经 0 增益节点静音，避免麦克风回声）才会触发 onaudioprocess。
+async function fallbackToScriptProcessor(stream) {
   const ctx = getAudioContext();
   if (!ctx) {
     console.warn('AudioContext 不可用，回退到 MediaRecorder 兜底');
@@ -999,9 +1049,13 @@ function fallbackToMediaRecorder(stream) {
 // 则回退到 MediaRecorder + decodeAudioData。
 // 返回 Uint8Array（标准 WAV）或 null（没有采集到有效声音）。
 async function cloudStopAndEncode() {
-  // 断开 ScriptProcessor 采集链路（停止 onaudioprocess）
+  // 断开采集链路：AudioWorkletNode 需关闭 message port 以停止 onmessage；
+  // ScriptProcessorNode 仅需清 onaudioprocess 回调（其 .port 不存在，已做守卫）。
   if (cloudNode) {
     try { cloudNode.disconnect(); } catch {}
+    if (cloudNode.port && typeof cloudNode.port.close === 'function') {
+      try { cloudNode.port.close(); } catch {}
+    }
     try { cloudNode.onaudioprocess = null; } catch {}
     cloudNode = null;
   }
