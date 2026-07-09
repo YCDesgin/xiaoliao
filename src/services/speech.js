@@ -833,15 +833,20 @@ export async function cloudAsr(audioBlob) {
   const audioBuf = await ctx.decodeAudioData(arrayBuffer.slice(0));
   const mono = resampleToMono16k(audioBuf);
   const wav = encodeWav(mono, 16000);
+  // 把 WAV 二进制转 base64 字符串后发送：
+  // 1) text/plain 是「简单请求」类型，不触发 CORS 预检（audio/wav 会触发 OPTIONS 预检，
+  //    而 FC 触发器未开 OPTIONS → 预检被拒 → 请求永久 pending）。
+  // 2) base64 是纯 ASCII，发 text/plain 时不受 FC 对 text/* body 的 UTF-8 文本化影响，
+  //    音频字节不损坏（代理统一按 base64 解码还原）。
+  const bytes = new Uint8Array(wav.buffer, wav.byteOffset, wav.byteLength);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  const base64Audio = btoa(binary);
   const sep = cloudUrl.includes('?') ? '&' : '?';
-  // 用 text/plain 而非 audio/wav：避免触发浏览器 CORS 预检(OPTIONS)。
-  // 跨域 POST + 非简单 Content-Type 会先发 OPTIONS 预检，而 FC 触发器未开
-  // OPTIONS → 预检被拒 → 主请求永久 pending → 前端一直 Transcribing。
-  // 阿里云 NLS 按 body 解析音频，Content-Type 不影响识别结果，故可放心用 text/plain。
   const res = await fetch(`${cloudUrl}${sep}action=asr`, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain' },
-    body: wav,
+    body: base64Audio,
     signal: AbortSignal.timeout(12000),
   });
   if (!res.ok) {
