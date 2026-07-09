@@ -18,6 +18,20 @@ function reportTtsError(msg) {
   if (ttsErrorHandler) { try { ttsErrorHandler(msg); } catch {} }
 }
 
+// --- Centralized ASR error reporting ---
+// Mirrors setTtsErrorHandler: lets the app layer surface a user-visible error
+// (e.g. red text in the input bar) when cloud speech recognition fails, so the
+// failure is never silently swallowed as empty text (the original Huawei bug).
+let asrErrorHandler = null;
+export function setAsrErrorHandler(fn) {
+  if (typeof fn === 'function') asrErrorHandler = fn;
+  else asrErrorHandler = null;
+}
+function reportAsrError(msg) {
+  console.error('[XiaLiao ASR] ' + msg);
+  if (asrErrorHandler) { try { asrErrorHandler(msg); } catch {} }
+}
+
 let ttsMode = 'browser'; // 'browser' | 'edgetts'
 
 // --- Web Audio API playback (mobile-safe) ---
@@ -289,6 +303,18 @@ let finalTranscript = '';      // Accumulated final transcript during continuous
 let lastTranscript = '';       // Full current text (final + current interim), used as fallback on stop
 let interimCallback = null;    // Callback for live interim text display
 
+// --- Cloud ASR capture (ScriptProcessor PCM path) ---
+// When the device has no usable native SpeechRecognition (e.g. Huawei without
+// GMS) but a cloud ASR proxy URL is configured, we capture mono Float32 PCM in
+// real time via AudioContext + ScriptProcessorNode, resample to 16k on stop, and
+// encode straight to a 16-bit WAV — bypassing MediaRecorder + decodeAudioData
+// (which Huawei's browser cannot decode for webm/opus, the original bug).
+let recordingUseCloud = false;   // true when this session uses the cloud ASR path
+let cloudNode = null;            // ScriptProcessorNode (PCM capture)
+let cloudSource = null;          // MediaStreamAudioSourceNode
+let pcmChunks = [];              // Float32Array[] of captured mono PCM frames
+let pcmSampleRate = 44100;       // sample rate of the captured PCM (ctx.sampleRate)
+
 /**
  * Start a manual recording session (press to start, press again to stop).
  * Speech recognition runs continuously — pauses and hesitations won't end it.
@@ -309,13 +335,17 @@ export async function startRecording(lang = 'en-US', onInterim = null) {
 
   interimCallback = onInterim || null;
 
-  // --- MediaRecorder (records user's own voice for playback) ---
+  // --- Reset capture state ---
   audioChunks = [];
-  mediaRecorder = new MediaRecorder(recordingStream, { mimeType: 'audio/webm' });
-  mediaRecorder.ondataavailable = (e) => {
-    if (e.data.size > 0) audioChunks.push(e.data);
-  };
-  mediaRecorder.start();
+  mediaRecorder = null;
+  cloudNode = null;
+  cloudSource = null;
+  pcmChunks = [];
+  pcmSampleRate = 44100;
+  finalTranscript = '';
+  lastTranscript = '';
+
+  const cloudUrlPresent = !!getCloudTtsUrl();
 
   // --- SpeechRecognition (continuous, won't auto-stop on pauses) ---
   // 注意：华为等无 GMS 设备的浏览器虽暴露 SpeechRecognition API，但 .start()
@@ -326,8 +356,6 @@ export async function startRecording(lang = 'en-US', onInterim = null) {
     try { recognition.stop(); } catch {}
     recognition = null;
   }
-  finalTranscript = '';
-  lastTranscript = '';
 
   if (SpeechRecognition) {
     recognition = new SpeechRecognition();
@@ -364,6 +392,12 @@ export async function startRecording(lang = 'en-US', onInterim = null) {
         // 引擎不可用：停止识别实例，让 stopRecording 走云端分支
         try { recognition.stop(); } catch {}
         recognition = null;
+        // 原生识别中途失效且云端可用：立即启动 ScriptProcessor 采集，
+        // 后续停止时直出 WAV（避免回放用的 webm 在华为上解不开）。
+        if (cloudUrlPresent && !cloudNode) {
+          recordingUseCloud = true;
+          setupCloudCapture(recordingStream);
+        }
       }
     };
 
@@ -386,6 +420,23 @@ export async function startRecording(lang = 'en-US', onInterim = null) {
       console.warn('SpeechRecognition.start() 失败，将使用云端 ASR:', err?.message || err);
       recognition = null;
     }
+  }
+
+  // --- Decide capture method ---
+  // 原生识别可用（recognition 仍存活）→ MediaRecorder 录 webm 供桌面回放（保持原逻辑）。
+  // 原生识别不可用（华为无 GMS，recognition 为 null）且配置了云端 ASR →
+  // ScriptProcessor 实时采集单声道 PCM（绕过 MediaRecorder + decodeAudioData）。
+  recordingUseCloud = !recognition && cloudUrlPresent;
+  if (recordingUseCloud) {
+    await setupCloudCapture(recordingStream);
+  } else {
+    // MediaRecorder（录用户自己的声音用于回放）
+    audioChunks = [];
+    mediaRecorder = new MediaRecorder(recordingStream, { mimeType: 'audio/webm' });
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) audioChunks.push(e.data);
+    };
+    mediaRecorder.start();
   }
 
   // Return a Promise that only resolves when the user calls stopRecording()
@@ -470,7 +521,37 @@ export function stopRecording() {
       recognitionStopped = true;
     }
 
-    // --- Stop MediaRecorder and collect audio ---
+    // --- Cloud ASR branch: encode captured PCM straight to WAV and upload ---
+    if (useCloud) {
+      // 云端模式：pcmChunks（ScriptProcessor 实时采集）或兜底 MediaRecorder → 直出 WAV → 代理。
+      // 彻底绕开 decodeAudioData（华为浏览器解不开 webm/opus 的原罪）。
+      cloudStopAndEncode()
+        .then((wavBytes) => {
+          if (!wavBytes) {
+            // 没有采集到有效声音
+            reportAsrError('没听到声音，请按住麦克风再说一次');
+            recorderStopped = true;
+            tryResolve();
+            return;
+          }
+          return cloudAsr(wavBytes).then((t) => {
+            cloudTranscript = t;
+            recorderStopped = true;
+            tryResolve();
+          });
+        })
+        .catch((e) => {
+          const msg = classifyAsrError(e);
+          reportAsrError(msg);
+          console.error('云端 ASR 失败:', e);
+          recorderStopped = true;
+          cloudTranscript = '';
+          tryResolve();
+        });
+      return;
+    }
+
+    // --- Native branch: stop MediaRecorder and collect webm for playback ---
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       mediaRecorder.onstop = () => {
         // 注意：云端模式下【保留】safetyTimeout 作为 fetch 兜底，不要 clearTimeout。
@@ -479,14 +560,7 @@ export function stopRecording() {
           ? new Blob(audioChunks, { type: 'audio/webm' })
           : null;
         recorderStopped = true;
-        if (useCloud && audioBlob) {
-          // 无原生识别：上传音频到云端 ASR 拿文本
-          cloudAsr(audioBlob)
-            .then((t) => { cloudTranscript = t; tryResolve(); })
-            .catch((e) => { console.error('云端 ASR 失败:', e); cloudTranscript = ''; tryResolve(); });
-        } else {
-          tryResolve();
-        }
+        tryResolve();
       };
       mediaRecorder.stop();
     } else {
@@ -776,15 +850,27 @@ export const SPEED_PRESETS = [
 ];
 
 // --- 云端语音识别 (ASR) ---
-// 当设备无原生 SpeechRecognition（如华为无 GMS），前端把录音解码后重采样为
-// 16k/16bit/单声道 PCM WAV，POST 到云端代理（阿里云一句话识别）换取文本。
-// 这样华为等国内手机无需 Google 引擎也能发起语音输入。
+// 当设备无原生 SpeechRecognition（如华为无 GMS），前端用 getUserMedia + AudioContext
+// 的 ScriptProcessor 实时采集单声道 Float32 PCM，停止时重采样为 16k/16bit/mono 的
+// 标准 WAV，POST 到云端代理（阿里云一句话识别）换取文本。这样华为等国内手机无需
+// Google 引擎也能发起语音输入，且彻底绕开 MediaRecorder + decodeAudioData（华为浏览器
+// 解不开 webm/opus，正是此前「松手后 Transcribing 消失却没文字」的根因）。
 
-// 重采样到 16k 单声道（语音场景取第一声道足够），线性插值
-function resampleToMono16k(audioBuffer) {
-  const srcRate = audioBuffer.sampleRate;
-  const srcData = audioBuffer.getChannelData(0);
+// 把多个 Float32Array 块拼成一个连续的 Float32Array
+function mergeFloat32(chunks) {
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const out = new Float32Array(total);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}
+
+// 重采样到 16k 单声道（语音场景取第一声道足够），线性插值。
+// 接收 Float32 PCM 与源采样率（不再接收 AudioBuffer），云端分支可直接调用。
+function resampleToMono16k(srcData, srcRate) {
   const targetRate = 16000;
+  if (!srcData || srcData.length === 0) return new Float32Array(0);
   const newLen = Math.max(1, Math.round((srcData.length * targetRate) / srcRate));
   const out = new Float32Array(newLen);
   for (let i = 0; i < newLen; i++) {
@@ -824,24 +910,148 @@ function encodeWav(samples, sampleRate) {
   return new Uint8Array(buffer);
 }
 
-export async function cloudAsr(audioBlob) {
+// Uint8Array → base64（分块处理，避免超大数组导致 String.fromCharCode 调用栈溢出）
+function arrayBufferToBase64(bytes) {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+// 把 ASR 异常归类为用户可读的中文提示
+function classifyAsrError(e) {
+  if (!e) return '语音识别失败，请重试';
+  const msg = e.message || String(e);
+  // AbortSignal.timeout 抛出的 DOMException，name 为 'TimeoutError'
+  if (e.name === 'TimeoutError') return '语音识别网络超时，请重试';
+  // fetch 网络层失败（CORS 被拒 / 服务端不可达 / 断网）
+  if (/Failed to fetch|NetworkError|network|网络/i.test(msg)) return '语音识别网络超时，请重试';
+  // 代理返回 HTTP 错误且无透传信息：原样展示状态码提示
+  if (/HTTP \d+/i.test(msg)) return msg;
+  // 其余（含代理透传的错误信息）直接展示
+  return msg || '语音识别失败，请重试';
+}
+
+// 云端模式采集：用 ScriptProcessor 实时抓取单声道 Float32 PCM。
+// 注意：必须把节点连到 destination（本实现经 0 增益节点静音，避免麦克风回声）
+// 才会触发 onaudioprocess。
+// 若 AudioContext / createScriptProcessor 不可用（极少），回退到 MediaRecorder + decodeAudioData 旧逻辑。
+async function setupCloudCapture(stream) {
+  const ctx = getAudioContext();
+  if (!ctx) {
+    console.warn('AudioContext 不可用，回退到 MediaRecorder 兜底');
+    fallbackToMediaRecorder(stream);
+    return;
+  }
+  if (ctx.state === 'suspended') {
+    try { await ctx.resume(); } catch {}
+  }
+  if (typeof ctx.createScriptProcessor !== 'function') {
+    console.warn('createScriptProcessor 不可用，回退到 MediaRecorder + decodeAudioData 兜底');
+    fallbackToMediaRecorder(stream);
+    return;
+  }
+  let source, node;
+  try {
+    source = ctx.createMediaStreamSource(stream);
+    node = ctx.createScriptProcessor(4096, 1, 1);
+  } catch (e) {
+    console.warn('ScriptProcessor 创建失败，回退到 MediaRecorder:', e);
+    fallbackToMediaRecorder(stream);
+    return;
+  }
+  pcmChunks = [];
+  pcmSampleRate = ctx.sampleRate;
+  node.onaudioprocess = (e) => {
+    const ch = e.inputBuffer.getChannelData(0);
+    if (ch && ch.length) pcmChunks.push(Float32Array.from(ch));
+  };
+  cloudSource = source;
+  cloudNode = node;
+  source.connect(node);
+  // 经静音 GainNode 连到 destination：既触发 onaudioprocess，又避免外放麦克风回声
+  const silent = ctx.createGain();
+  silent.gain.value = 0;
+  node.connect(silent);
+  silent.connect(ctx.destination);
+}
+
+// 兜底：ScriptProcessor 不可用时的旧逻辑（MediaRecorder 录 webm，停止时再 decode）
+function fallbackToMediaRecorder(stream) {
+  audioChunks = [];
+  try {
+    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+  } catch {
+    try { mediaRecorder = new MediaRecorder(stream); } catch { mediaRecorder = null; }
+  }
+  if (mediaRecorder) {
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) audioChunks.push(e.data);
+    };
+    try { mediaRecorder.start(); } catch { mediaRecorder = null; }
+  }
+}
+
+// 云端模式停止采集并把 PCM 编码成 16k/16bit/mono 的标准 WAV 字节。
+// 优先使用 ScriptProcessor 实时采集的 pcmChunks；若 ScriptProcessor 不可用（极少）
+// 则回退到 MediaRecorder + decodeAudioData。
+// 返回 Uint8Array（标准 WAV）或 null（没有采集到有效声音）。
+async function cloudStopAndEncode() {
+  // 断开 ScriptProcessor 采集链路（停止 onaudioprocess）
+  if (cloudNode) {
+    try { cloudNode.disconnect(); } catch {}
+    try { cloudNode.onaudioprocess = null; } catch {}
+    cloudNode = null;
+  }
+  if (cloudSource) {
+    try { cloudSource.disconnect(); } catch {}
+    cloudSource = null;
+  }
+
+  if (pcmChunks.length > 0) {
+    const total = pcmChunks.reduce((s, c) => s + c.length, 0);
+    const captured = pcmChunks;
+    pcmChunks = [];
+    // 采集时长过短（<30ms@16k）视为没说话 / 纯静音
+    if (total < 480) return null;
+    const pcm = mergeFloat32(captured);
+    const mono16k = resampleToMono16k(pcm, pcmSampleRate);
+    return encodeWav(mono16k, 16000);
+  }
+
+  // 兜底：MediaRecorder 录 webm（ScriptProcessor 不可用场景）
+  if (mediaRecorder && audioChunks.length > 0) {
+    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+    audioChunks = [];
+    try {
+      const arrayBuffer = await audioBlob.arrayBuffer();
+      const ctx = getAudioContext();
+      if (!ctx) return null;
+      const audioBuf = await ctx.decodeAudioData(arrayBuffer.slice(0));
+      const mono = resampleToMono16k(audioBuf.getChannelData(0), audioBuf.sampleRate);
+      return encodeWav(mono, 16000);
+    } catch (e) {
+      console.warn('云端兜底解码失败:', e);
+      return null;
+    }
+  }
+
+  return null;
+}
+
+export async function cloudAsr(wavBytes) {
   const cloudUrl = getCloudTtsUrl();
   if (!cloudUrl) return '';
-  const arrayBuffer = await audioBlob.arrayBuffer();
-  const ctx = getAudioContext();
-  if (!ctx) throw new Error('Web Audio 不可用，无法转码音频');
-  const audioBuf = await ctx.decodeAudioData(arrayBuffer.slice(0));
-  const mono = resampleToMono16k(audioBuf);
-  const wav = encodeWav(mono, 16000);
-  // 把 WAV 二进制转 base64 字符串后发送：
-  // 1) text/plain 是「简单请求」类型，不触发 CORS 预检（audio/wav 会触发 OPTIONS 预检，
-  //    而 FC 触发器未开 OPTIONS → 预检被拒 → 请求永久 pending）。
-  // 2) base64 是纯 ASCII，发 text/plain 时不受 FC 对 text/* body 的 UTF-8 文本化影响，
-  //    音频字节不损坏（代理统一按 base64 解码还原）。
-  const bytes = new Uint8Array(wav.buffer, wav.byteOffset, wav.byteLength);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  const base64Audio = btoa(binary);
+  // wavBytes: 已经编码好的 WAV 字节（Uint8Array）或 Blob。直接转 base64 发送，不再解码。
+  let base64Audio;
+  if (wavBytes instanceof Blob) {
+    const ab = await wavBytes.arrayBuffer();
+    base64Audio = arrayBufferToBase64(new Uint8Array(ab));
+  } else {
+    base64Audio = arrayBufferToBase64(wavBytes);
+  }
   const sep = cloudUrl.includes('?') ? '&' : '?';
   const res = await fetch(`${cloudUrl}${sep}action=asr`, {
     method: 'POST',
@@ -850,8 +1060,12 @@ export async function cloudAsr(audioBlob) {
     signal: AbortSignal.timeout(12000),
   });
   if (!res.ok) {
-    let msg = `ASR 请求失败 (HTTP ${res.status})`;
-    try { const j = await res.json(); if (j.error) msg = j.error; } catch {}
+    // 代理透传的错误信息（j.error）优先；否则给出 HTTP 状态提示
+    let msg = `语音识别服务返回错误 (HTTP ${res.status})`;
+    try {
+      const j = await res.json();
+      if (j && j.error) msg = j.error;
+    } catch {}
     throw new Error(msg);
   }
   const json = await res.json();

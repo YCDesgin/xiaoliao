@@ -1,13 +1,20 @@
-import { useState, useRef, useCallback } from 'react';
-import { startRecording, stopRecording, supportsVoiceInput } from '../services/speech';
+import { useState, useRef, useCallback, useEffect } from 'react';
+import { startRecording, stopRecording, supportsVoiceInput, setAsrErrorHandler } from '../services/speech';
 
 export default function MessageInput({ onSend, disabled }) {
   const [text, setText] = useState('');
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [showTextInput, setShowTextInput] = useState(false);
+  const [asrError, setAsrError] = useState('');
   const recordingRef = useRef(false);
   const canRecord = supportsVoiceInput();
+
+  // 注册云端 ASR 错误回调：识别失败时把可读中文错误显示在输入框区域（红字）。
+  useEffect(() => {
+    setAsrErrorHandler((msg) => setAsrError(msg || ''));
+    return () => setAsrErrorHandler(null);
+  }, []);
 
   const handleMicClick = useCallback(async () => {
     if (!canRecord || disabled) return;
@@ -18,6 +25,7 @@ export default function MessageInput({ onSend, disabled }) {
       if (transcript?.trim()) onSend(transcript.trim(), audioBlob);
       return;
     }
+    setAsrError(''); // 新一轮录音，清除上一次的错误提示
     recordingRef.current = true; setIsRecording(true); setIsTranscribing(false);
     startRecording('en-US', null).catch(console.error).finally(() => {
       if (recordingRef.current) { recordingRef.current = false; setIsRecording(false); setIsTranscribing(false); }
@@ -32,6 +40,13 @@ export default function MessageInput({ onSend, disabled }) {
         <div className="mb-2 px-3 py-1.5 bg-[#0e1621] rounded-lg flex items-center gap-2 fade-in">
           <div className="w-3.5 h-3.5 border-2 border-[#2aabee]/30 border-t-[#2aabee] rounded-full animate-spin" />
           <div className="text-[11px] text-[#707579]">Transcribing...</div>
+        </div>
+      )}
+      {asrError && (
+        <div className="mb-2 px-3 py-1.5 bg-[#2a1215] rounded-lg fade-in">
+          <div className="text-[11px] text-[#ff6b6b]">
+            {asrError.startsWith('没听到声音') ? '' : '语音识别失败：'}{asrError}
+          </div>
         </div>
       )}
       {showTextInput && (
