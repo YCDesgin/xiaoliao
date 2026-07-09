@@ -124,7 +124,7 @@ async function synthesizeChunk(text, voice, speechRate) {
 }
 
 // --- 通用 HTTPS POST（发送二进制 body，用于 ASR 音频上传）---
-function httpsPostBuffer(urlStr, bodyBuffer, contentType, timeoutMs = 30000) {
+function httpsPostBuffer(urlStr, bodyBuffer, contentType, timeoutMs = 30000, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const req = https.request(
       urlStr,
@@ -133,6 +133,7 @@ function httpsPostBuffer(urlStr, bodyBuffer, contentType, timeoutMs = 30000) {
         headers: {
           'Content-Type': contentType,
           'Content-Length': bodyBuffer.length,
+          ...extraHeaders,
         },
       },
       (res) => {
@@ -159,12 +160,11 @@ async function recognizeChunk(wavBuffer) {
   const token = await getToken();
   const q = new URLSearchParams();
   q.set('appkey', APPKEY);
-  q.set('token', token);
   q.set('format', 'wav');
   q.set('sample_rate', '16000');
-  q.set('enable_punctuation', 'true');
-  const url = `https://${GATEWAY_HOST}/recognize?${q.toString()}`;
-  const res = await httpsPostBuffer(url, wavBuffer, 'application/octet-stream', 30000);
+  q.set('enable_punctuation_prediction', 'true');
+  const url = `https://${GATEWAY_HOST}/stream/v1/asr?${q.toString()}`;
+  const res = await httpsPostBuffer(url, wavBuffer, 'application/octet-stream', 30000, { 'X-NLS-Token': token });
 
   let data;
   try {

@@ -318,6 +318,9 @@ export async function startRecording(lang = 'en-US', onInterim = null) {
   mediaRecorder.start();
 
   // --- SpeechRecognition (continuous, won't auto-stop on pauses) ---
+  // 注意：华为等无 GMS 设备的浏览器虽暴露 SpeechRecognition API，但 .start()
+  // 会报 "找不到 Google 语音引擎" 等错误。因此必须用 try-catch 包裹 .start()，
+  // 失败时清除 recognition 引用，让 stopRecording() 自动降级到云端 ASR 分支。
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (recognition) {
     try { recognition.stop(); } catch {}
@@ -353,21 +356,36 @@ export async function startRecording(lang = 'en-US', onInterim = null) {
 
     recognition.onerror = (event) => {
       // no-speech / audio-capture / aborted are normal during continuous recording
-      // — don't stop, just log and keep going
+      // — don't stop, just log and keep going.
+      // "service-not-allowed" / "network" 等表示引擎不可用（如华为无 GMS），
+      // 标记为无效，stopRecording 会降级到云端 ASR。
       console.log('SpeechRecognition event:', event.error);
+      if (event.error === 'service-not-allowed' || event.error === 'no-speech' || event.error === 'audio-capture' || event.error === 'network') {
+        // 引擎不可用：停止识别实例，让 stopRecording 走云端分支
+        try { recognition.stop(); } catch {}
+        recognition = null;
+      }
     };
 
     recognition.onend = () => {
       // Auto-restart if we're still supposed to be recording.
       // This handles Chrome's internal timeout without stopping the session.
-      if (mediaRecorder && mediaRecorder.state === 'recording') {
+      if (mediaRecorder && mediaRecorder.state === 'recording' && recognition) {
         try { recognition.start(); } catch {
-          // If restart fails (e.g. tab losing focus), just wait for user to stop manually
+          // If restart fails (e.g. tab losing focus or no engine), just wait for user to stop manually
+          recognition = null;
         }
       }
     };
 
-    recognition.start();
+    try {
+      recognition.start();
+    } catch (err) {
+      // .start() 同步抛异常（华为无 GMS 会走这里）：清除 recognition，
+      // stopRecording 中的 useCloud 判断 (!recognition) 会为 true → 走云端 ASR
+      console.warn('SpeechRecognition.start() 失败，将使用云端 ASR:', err?.message || err);
+      recognition = null;
+    }
   }
 
   // Return a Promise that only resolves when the user calls stopRecording()
