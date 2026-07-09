@@ -473,7 +473,8 @@ export function stopRecording() {
     // --- Stop MediaRecorder and collect audio ---
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       mediaRecorder.onstop = () => {
-        clearTimeout(safetyTimeout);
+        // 注意：云端模式下【保留】safetyTimeout 作为 fetch 兜底，不要 clearTimeout。
+        // 否则若云端请求因 CORS/网络挂起，会永远停在 Transcribing（无超时兜底）。
         audioBlob = audioChunks.length > 0
           ? new Blob(audioChunks, { type: 'audio/webm' })
           : null;
@@ -833,10 +834,15 @@ export async function cloudAsr(audioBlob) {
   const mono = resampleToMono16k(audioBuf);
   const wav = encodeWav(mono, 16000);
   const sep = cloudUrl.includes('?') ? '&' : '?';
+  // 用 text/plain 而非 audio/wav：避免触发浏览器 CORS 预检(OPTIONS)。
+  // 跨域 POST + 非简单 Content-Type 会先发 OPTIONS 预检，而 FC 触发器未开
+  // OPTIONS → 预检被拒 → 主请求永久 pending → 前端一直 Transcribing。
+  // 阿里云 NLS 按 body 解析音频，Content-Type 不影响识别结果，故可放心用 text/plain。
   const res = await fetch(`${cloudUrl}${sep}action=asr`, {
     method: 'POST',
-    headers: { 'Content-Type': 'audio/wav' },
+    headers: { 'Content-Type': 'text/plain' },
     body: wav,
+    signal: AbortSignal.timeout(12000),
   });
   if (!res.ok) {
     let msg = `ASR 请求失败 (HTTP ${res.status})`;
