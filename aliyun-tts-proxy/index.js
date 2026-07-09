@@ -369,22 +369,23 @@ module.exports.handler = async function (event, context, callback) {
       // FC 直接二进制透传（罕见，仅非标准配置下）
       bodyBuf = rawBody;
     } else {
+      // 超鲁棒解码：不依赖 isBase64Encoded 分支判断，兼容 FC 对任意大小/类型
+      // 请求体的编码差异（原样透传 / 二次 base64 / 二进制 base64 化）。
       const s = typeof rawBody === 'string' ? rawBody : String(rawBody);
+      let candidate = s;
       if (e.isBase64Encoded) {
-        // FC 对较大的请求体（无论 Content-Type）会自动再做一层 base64 编码并设置
-        // isBase64Encoded=true。先剥掉这层，拿到「客户端真正发出的 body」。
-        const decoded = Buffer.from(s, 'base64');
-        // 若解码后是合法 WAV（RIFF 头），说明客户端直接发了二进制音频（curl --data-binary）
-        if (decoded.slice(0, 4).toString('latin1') === 'RIFF') {
-          bodyBuf = decoded;
-        } else {
-          // 否则客户端发的是 base64 字符串（前端 btoa 后 text/plain 上传），
-          // 再解一层 base64 才得到真正的 WAV 二进制
-          bodyBuf = Buffer.from(decoded.toString('utf8').replace(/\s+/g, ''), 'base64');
-        }
+        // FC 对较大的请求体可能再做一层 base64 编码并设置 isBase64Encoded=true，
+        // 先剥掉这层，拿到「客户端真正发出的内容」。
+        candidate = Buffer.from(s, 'base64').toString('latin1');
+      }
+      // candidate 现在是客户端发出的原始内容：
+      //   · 前端走 text/plain 上传的是 base64(WAV) 字符串 → 按 base64 解即 WAV
+      //   · 部分场景下二进制被文本化 → candidate 是 WAV 字节的 latin1 表示 → 直接还原
+      const asWav = Buffer.from(candidate.replace(/\s+/g, ''), 'base64');
+      if (asWav.slice(0, 4).toString('latin1') === 'RIFF') {
+        bodyBuf = asWav;                       // 标准 base64(WAV)
       } else {
-        // FC 未编码，rawBody 即客户端原样发出的 base64 字符串
-        bodyBuf = Buffer.from(s.replace(/\s+/g, ''), 'base64');
+        bodyBuf = Buffer.from(candidate, 'latin1'); // 二进制被文本化，直接还原字节
       }
     }
     if (!bodyBuf || bodyBuf.length === 0) {
