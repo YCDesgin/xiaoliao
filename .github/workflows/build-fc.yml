@@ -1,8 +1,10 @@
 name: Build FC proxy (Linux)
 
 # 在 Linux 沙箱里为阿里云 FC 代理打部署包（含 Linux 版 ffmpeg-static 二进制）。
-# 用法：GitHub → Actions → 本工作流 → Run workflow → 下载产物 fc-proxy-deploy.zip
-# 然后把该 zip 上传到阿里云 FC 控制台对应函数即可。无需本机 WSL、无需阿里云凭证。
+# 用法：GitHub → Actions → 本工作流 → Run workflow → 下载产物（是一个 zip）
+# 解压该 zip 后直接得到代码目录（index.js / package.json / node_modules/ 等），
+# 把整个目录重新打包成 zip（index.js 在根）或直接在 FC 控制台"上传代码→文件夹"上传。
+# 注意：下载的 artifact 本身会被 GitHub 包一层 zip，解压一次即得代码，无需再解压第二层。
 
 on:
   workflow_dispatch:
@@ -30,12 +32,8 @@ jobs:
         working-directory: aliyun-tts-proxy
         run: file node_modules/ffmpeg-static/ffmpeg
 
-      - name: Package deploy zip
-        working-directory: aliyun-tts-proxy
-        run: zip -r ../fc-proxy-deploy.zip . -x "node_modules/.cache/*"
-
-      - name: Upload artifact
+      - name: Upload artifact (code dir, no nested zip)
         uses: actions/upload-artifact@v4
         with:
           name: fc-proxy-deploy
-          path: fc-proxy-deploy.zip
+          path: aliyun-tts-proxy
