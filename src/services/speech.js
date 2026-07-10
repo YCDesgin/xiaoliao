@@ -328,6 +328,7 @@ let recordingStream = null;    // Microphone stream for cleanup
 let finalTranscript = '';      // Accumulated final transcript during continuous recording
 let lastTranscript = '';       // Full current text (final + current interim), used as fallback on stop
 let interimCallback = null;    // Callback for live interim text display
+let recordingSafetyTimer = null; // Module-level safety-timeout handle so cancelRecording can clear it
 
 // --- Cloud ASR capture (raw upload path) ---
 // When the device has no usable native SpeechRecognition (e.g. Huawei without
@@ -366,8 +367,10 @@ export async function startRecording(lang = 'en-US', onInterim = null) {
   audioChunks = [];
   mediaRecorder = null;
   cloudRecordedMimeType = '';
+  recordingUseCloud = false;
   finalTranscript = '';
   lastTranscript = '';
+  recordingSafetyTimer = null;
 
   const cloudUrlPresent = !!getCloudTtsUrl();
 
@@ -530,7 +533,9 @@ export function stopRecording() {
     };
 
     // 安全超时：原生模式等 recognition 收尾（3s）；云端模式等上传+识别（15s）
-    const safetyTimeout = setTimeout(() => {
+    // 提成模块级 recordingSafetyTimer，以便 cancelRecording 能清除潜在兜底 timer。
+    recordingSafetyTimer = setTimeout(() => {
+      recordingSafetyTimer = null;
       // 超时兜底：无论云端还是原生，都必须给红字提示 + 诊断条，绝不再静默消失
       if (!resolved) {
         if (useCloud) {
@@ -617,7 +622,7 @@ export function stopRecording() {
     // --- Native branch: stop MediaRecorder and collect webm for playback ---
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       mediaRecorder.onstop = () => {
-        // 注意：云端模式下【保留】safetyTimeout 作为 fetch 兜底，不要 clearTimeout。
+        // 注意：云端模式下【保留】recordingSafetyTimer 作为 fetch 兜底，不要 clearTimeout。
         // 否则若云端请求因 CORS/网络挂起，会永远停在 Transcribing（无超时兜底）。
         audioBlob = audioChunks.length > 0
           ? new Blob(audioChunks, { type: 'audio/webm' })
@@ -627,12 +632,85 @@ export function stopRecording() {
       };
       mediaRecorder.stop();
     } else {
-      clearTimeout(safetyTimeout);
+      clearTimeout(recordingSafetyTimer);
+      recordingSafetyTimer = null;
       audioBlob = null;
       recorderStopped = true;
       tryResolve();
     }
   });
+}
+
+/**
+ * Cancel an in-progress recording session.
+ *
+ * Stops capture, releases the microphone, and discards all collected audio —
+ * WITHOUT resolving a sendable result and WITHOUT surfacing an error (a cancel
+ * is a deliberate user action, so it stays neutral). The dangling Promise from
+ * startRecording() is resolved with an empty payload so the UI's await never
+ * leaks and the recording state doesn't get stuck.
+ *
+ * Idempotent & safe: if there is no active recording session, this is a no-op.
+ */
+export function cancelRecording() {
+  // Nothing to cancel — no active recording session.
+  if (!recordingResolve && !mediaRecorder && !recognition && !recordingStream) {
+    return;
+  }
+
+  // Clear the safety-timeout so a later firing can't trigger error reporting
+  // or a spurious resolve after the session was cancelled.
+  if (recordingSafetyTimer) {
+    clearTimeout(recordingSafetyTimer);
+    recordingSafetyTimer = null;
+  }
+
+  // Stop the MediaRecorder (if still recording).
+  try {
+    if (mediaRecorder && typeof mediaRecorder.stop === 'function'
+        && mediaRecorder.state === 'recording') {
+      mediaRecorder.stop();
+    }
+  } catch {}
+
+  // Stop speech recognition (if any) and detach its handlers.
+  try {
+    if (recognition) recognition.stop();
+  } catch {}
+  if (recognition) {
+    recognition.onresult = null;
+    recognition.onend = null;
+    recognition.onerror = null;
+  }
+
+  // Release the microphone.
+  if (recordingStream) {
+    try {
+      recordingStream.getTracks().forEach(t => t.stop());
+    } catch {}
+    recordingStream = null;
+  }
+
+  // Reset all capture state so a fresh recording starts clean.
+  mediaRecorder = null;
+  recognition = null;
+  audioChunks = [];
+  recordingUseCloud = false;
+  cloudRecordedMimeType = '';
+  finalTranscript = '';
+  lastTranscript = '';
+  interimCallback = null;
+
+  // Resolve the dangling Promise from startRecording() with an empty payload
+  // so the UI's await doesn't leak. The UI must treat an empty transcript as
+  // "do not send".
+  if (recordingResolve) {
+    recordingResolve({ transcript: '', audioBlob: null });
+    recordingResolve = null;
+  }
+
+  // Neutral status update — NOT an error (cancel is a deliberate user action).
+  reportAsrStatus({ mode: getAsrModeLabel(), phase: '待命', detail: '已取消' });
 }
 
 /**

@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { startRecording, stopRecording, supportsVoiceInput, setAsrErrorHandler, setAsrStatusHandler, getAsrModeLabel } from '../services/speech';
+import { startRecording, stopRecording, cancelRecording, supportsVoiceInput, setAsrErrorHandler, setAsrStatusHandler, getAsrModeLabel } from '../services/speech';
 
 export default function MessageInput({ onSend, disabled }) {
   const [text, setText] = useState('');
@@ -34,6 +34,17 @@ export default function MessageInput({ onSend, disabled }) {
       if (recordingRef.current) { recordingRef.current = false; setIsRecording(false); setIsTranscribing(false); }
     });
   }, [canRecord, disabled, onSend]);
+
+  // 取消录音：停止采集、释放麦克风、丢弃音频、不发送、回到初始态。
+  // 仅当正在录音（recordingRef 为真）时生效；取消后绝不调用 onSend。
+  const handleCancel = useCallback(() => {
+    if (!recordingRef.current) return;
+    recordingRef.current = false;
+    setIsRecording(false);
+    setIsTranscribing(false);
+    cancelRecording();
+    setAsrStatus((prev) => ({ ...prev, phase: '待命', detail: '' }));
+  }, []);
 
   const handleSendText = () => { if (text.trim() && !disabled) { onSend(text.trim()); setText(''); } };
 
@@ -82,13 +93,27 @@ export default function MessageInput({ onSend, disabled }) {
           className={`w-10 h-10 rounded-full flex items-center justify-center text-lg transition-colors flex-shrink-0 ${showTextInput ? 'bg-[#2aabee]/15 text-[#2aabee]' : 'hover:bg-[#1f2c3a] text-[#707579]'}`}>
           ⌨
         </button>
-        <button onClick={handleMicClick} disabled={!canRecord || disabled || isTranscribing}
-          className={`flex-1 h-10 rounded-full flex items-center justify-center gap-2 text-sm font-medium transition-all ${isRecording ? 'bg-[#e74c3c] text-white recording-pulse relative' : isTranscribing ? 'bg-[#0e1621] text-[#2aabee]' : canRecord ? 'bg-[#0e1621] text-[#aaaaaa] hover:bg-[#1f2c3a]' : 'bg-[#0e1621] text-[#5a6a7a]'}`}>
-          {isRecording ? (<><div className="w-2 h-2 rounded-full bg-white" /> <span>Tap to stop</span></>)
-           : isTranscribing ? 'Transcribing...'
-           : canRecord ? (<><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg> <span>Hold to talk</span></>)
-           : 'Mic not supported'}
-        </button>
+        {isRecording ? (
+          <>
+            {/* 左：取消 — 停止并丢弃，不发送 */}
+            <button onClick={handleCancel}
+              className="flex-1 h-10 rounded-full flex items-center justify-center gap-2 text-sm font-medium transition-all bg-[#0e1621] text-[#707579] hover:bg-[#1f2c3a]">
+              <span>✕</span><span>取消</span>
+            </button>
+            {/* 右：完成/发送 — 沿用现有 stop+send 逻辑，行为不变 */}
+            <button onClick={handleMicClick}
+              className="flex-1 h-10 rounded-full flex items-center justify-center gap-2 text-sm font-medium transition-all bg-[#e74c3c] text-white recording-pulse relative">
+              <span>✓</span><span>完成</span>
+            </button>
+          </>
+        ) : (
+          <button onClick={handleMicClick} disabled={!canRecord || disabled || isTranscribing}
+            className={`flex-1 h-10 rounded-full flex items-center justify-center gap-2 text-sm font-medium transition-all ${isTranscribing ? 'bg-[#0e1621] text-[#2aabee]' : canRecord ? 'bg-[#0e1621] text-[#aaaaaa] hover:bg-[#1f2c3a]' : 'bg-[#0e1621] text-[#5a6a7a]'}`}>
+            {isTranscribing ? 'Transcribing...'
+             : canRecord ? (<><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg> <span>Hold to talk</span></>)
+             : 'Mic not supported'}
+          </button>
+        )}
       </div>
     </div>
   );
