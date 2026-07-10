@@ -4,6 +4,7 @@ import MessageInput from './MessageInput';
 import { chatWithAI, reviewConversation } from '../services/gemini';
 import { speakText, stopSpeaking, SPEED_PRESETS } from '../services/speech';
 import { DIFFICULTY_PRESETS, getContactDifficulty, setContactDifficulty } from '../data/contacts';
+import { getEffectiveVoice } from '../data/voices';
 import { fingerprintOf, findCached, saveReview, clearReviews } from '../services/reviewStore';
 import { searchImage, cleanQuery } from '../services/imageService';
 
@@ -70,7 +71,7 @@ export default function ChatView({ contact, messages, setMessages, apiKey, userA
       setMessages([opening]);
       const t = setTimeout(() => {
         setPlayingId(opening.id);
-        speakText(opening.text, { voice: contact.voice, rate: chatSpeed, mode: 'edgetts' }).finally(() => setPlayingId(null));
+        speakText(opening.text, { voice: getEffectiveVoice(contact), rate: chatSpeed, mode: 'edgetts' }).finally(() => setPlayingId(null));
       }, 500);
       return () => clearTimeout(t);
     }
@@ -115,11 +116,11 @@ export default function ChatView({ contact, messages, setMessages, apiKey, userA
       const aiMsg = { id: (Date.now() + 1).toString(), role: 'them', text: reply, timestamp: new Date() };
       setMessages(p => [...p, aiMsg]);
       setPlayingId(aiMsg.id);
-      speakText(reply, { voice: contact.voice, rate: chatSpeed, mode: 'edgetts' }).finally(() => setPlayingId(null));
+      speakText(reply, { voice: getEffectiveVoice(contact), rate: chatSpeed, mode: 'edgetts' }).finally(() => setPlayingId(null));
     } catch (err) {
       setMessages(p => [...p, { id: (Date.now() + 1).toString(), role: 'them', text: `[Error: ${err.message}]`, timestamp: new Date(), isError: true }]);
     } finally { setLoading(false); }
-  }, [messages, apiKey, systemPrompt, loading, setMessages, contact.voice, chatSpeed, appendImageMessage]);
+  }, [messages, apiKey, systemPrompt, loading, setMessages, contact, chatSpeed, appendImageMessage]);
 
   // Build a structured review object, mapping the raw AI result into a
   // guaranteed shape (with sensible defaults) so the review page never breaks.
@@ -225,8 +226,8 @@ export default function ChatView({ contact, messages, setMessages, apiKey, userA
   const handlePlay = useCallback((msgId, text) => {
     if (playingId === msgId) { stopSpeaking(); setPlayingId(null); return; }
     stopSpeaking(); setPlayingId(msgId);
-    speakText(text, { voice: contact.voice, rate: chatSpeed, mode: 'edgetts' }).finally(() => setPlayingId(null));
-  }, [playingId, contact.voice, chatSpeed]);
+    speakText(text, { voice: getEffectiveVoice(contact), rate: chatSpeed, mode: 'edgetts' }).finally(() => setPlayingId(null));
+  }, [playingId, contact, chatSpeed]);
 
   const formatDate = (d) => d?.toLocaleDateString([], { month: 'long', day: 'numeric' });
 
@@ -256,13 +257,17 @@ export default function ChatView({ contact, messages, setMessages, apiKey, userA
               <div className="fixed inset-0 z-40" onClick={() => setShowSettings(false)} />
               <div className="absolute right-0 top-10 z-50 w-48 bg-[#17212b] border border-[#1c2a3a] rounded-xl p-3 shadow-lg slide-up">
                 <div className="text-[11px] text-[#707579] mb-1.5 font-medium">Difficulty</div>
-                <div className="flex gap-1 mb-3">
+                <div className="flex gap-1 mb-1.5">
                   {DIFFICULTY_PRESETS.map(p => (
                     <button key={p.id} onClick={() => pickDifficulty(p.id)}
                       className={`flex-1 py-1.5 text-[11px] rounded-lg transition-colors ${difficulty === p.id ? 'bg-[#2aabee] text-white' : 'bg-[#0e1621] text-[#707579] hover:bg-[#1f2c3a]'}`}>
                       {p.label}
                     </button>
                   ))}
+                </div>
+                {/* 难度切换即时反馈：显示当前难度的核心规则（不改变 systemPrompt 逻辑） */}
+                <div className="text-[10px] text-[#5a6a7a] mb-3 px-0.5">
+                  当前难度 · {DIFFICULTY_PRESETS.find(p => p.id === difficulty)?.summary || ''}
                 </div>
                 <div className="text-[11px] text-[#707579] mb-1.5 font-medium">Speed</div>
                 <div className="flex gap-1 mb-3">

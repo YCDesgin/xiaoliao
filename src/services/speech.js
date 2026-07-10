@@ -573,6 +573,10 @@ export function stopRecording() {
       reportAsrStatus({ phase: '上传中', detail: '上传音频到云端' });
       cloudStopAndEncode()
         .then((wavBytes) => {
+          // 关键修复：云端分支此前从未给 audioBlob 赋值（原生分支有），
+          // 导致用户消息 audioBlob=null → 回放误走 TTS 念文字（变音）。
+          // cloudStopAndEncode() 已返回原始录音 Blob，这里存进同作用域的 audioBlob。
+          audioBlob = wavBytes;
           if (!wavBytes) {
             // 没有采集到有效声音
             reportAsrError('没听到声音，请按住麦克风再说一次');

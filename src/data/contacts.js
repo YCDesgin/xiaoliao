@@ -1,10 +1,13 @@
 // Contact data and their AI personality prompts
+import { assignDefaultVoice } from './voices';
 
 export const DIFFICULTY_PRESETS = [
   {
     id: 'beginner',
     label: '入门',
     grade: 1,
+    // summary：难度切换后的即时反馈文案（ChatView 难度按钮下方显示）
+    summary: '极简短句',
     rules: `
 DIFFICULTY: BEGINNER — The person you're talking to is just starting to learn English.
 - Use VERY simple words (grade 1-2 reading level). Avoid any complex vocabulary.
@@ -19,6 +22,8 @@ DIFFICULTY: BEGINNER — The person you're talking to is just starting to learn 
     id: 'intermediate',
     label: '进阶',
     grade: 2,
+    // summary：难度切换后的即时反馈文案
+    summary: '日常对话',
     rules: `
 DIFFICULTY: INTERMEDIATE — The person can hold basic conversations.
 - Use everyday conversational English with common vocabulary.
@@ -32,6 +37,8 @@ DIFFICULTY: INTERMEDIATE — The person can hold basic conversations.
     id: 'advanced',
     label: '熟练',
     grade: 3,
+    // summary：难度切换后的即时反馈文案
+    summary: '母语级 idiom',
     rules: `
 DIFFICULTY: ADVANCED — The person wants to practice natural native-level conversation.
 - Speak naturally like a native English speaker.
@@ -58,7 +65,7 @@ function buildSystemPrompt(contact, difficultyId) {
   return `${contact.basePrompt}\n\n${diff.rules}`;
 }
 
-export const contacts = [
+const _rawContacts = [
   {
     id: 'alex',
     name: 'Alex',
@@ -74,7 +81,6 @@ CORE RULES:
 - NEVER act like a teacher. Don't correct grammar, don't explain words, don't praise their English.
 - Topics you naturally talk about: weekend plans, travel stories, music recs, tech news, food, Seattle weather, hiking trails.`,
     openingLine: "Hey! Long time no chat — how's your week been?",
-    voice: 'en-US-ChristopherNeural',
   },
   {
     id: 'sam',
@@ -91,9 +97,15 @@ CORE RULES:
 - NEVER act like a teacher. Don't correct grammar, don't explain words.
 - Topics you naturally talk about: settling into a new city, creative work, favorite neighborhoods, weekend markets, art galleries, food spots, meeting new people.`,
     openingLine: "Hey! So I just moved here and I'm totally lost — got any tips for surviving this city? 😅",
-    voice: 'en-US-AvaNeural',
   }
 ];
+
+// 每个角色的音色默认值：按名字 + 头像自动分配（阿里云发音人），
+// 保证默认就不同声；用户仍可在设置里为每个角色手动覆盖。
+export const contacts = _rawContacts.map((c) => ({
+  ...c,
+  voice: assignDefaultVoice(c),
+}));
 
 export function getContact(id) {
   const c = contacts.find(c => c.id === id);

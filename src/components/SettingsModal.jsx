@@ -1,4 +1,6 @@
 import { useState, useRef } from 'react';
+import { contacts } from '../data/contacts';
+import { ALIYUN_VOICE_OPTIONS, getContactVoiceOverride, setContactVoiceOverride, getEffectiveVoice } from '../data/voices';
 
 // Edge-TTS voice options for the "AI 语音" dropdown.
 const VOICE_OPTIONS = [
@@ -22,6 +24,8 @@ export default function SettingsModal({ apiKey, userAvatar, onSave, onSaveAvatar
   const [preferredVoice, setPreferredVoice] = useState(
     localStorage.getItem('speakup_preferred_voice') || 'en-US-JennyNeural',
   );
+  // 强制刷新角色语音下拉：用户改完覆盖后让对应 <select> 立即反映新值。
+  const [voiceTick, setVoiceTick] = useState(0);
   const fileRef = useRef(null);
 
   const handleSave = () => {
@@ -128,6 +132,30 @@ export default function SettingsModal({ apiKey, userAvatar, onSave, onSaveAvatar
               <option key={o.value} value={o.value}>{o.label}</option>
             ))}
           </select>
+        </div>
+
+        {/* Per-contact voice override: 为每个 AI 角色单独指定音色（覆盖默认自动分配） */}
+        <div className="mt-4">
+          <label className="block text-xs text-[#707579] mb-1.5">角色语音</label>
+          <div className="space-y-2">
+            {contacts.map(c => (
+              <div key={c.id} className="flex items-center gap-2">
+                <img src={c.avatar} alt={c.name} className="w-7 h-7 rounded-full object-cover bg-[#1f2c3a] flex-shrink-0" />
+                <span className="text-xs text-[#f5f5f5] w-14 flex-shrink-0 truncate">{c.name}</span>
+                <select
+                  key={voiceTick}
+                  value={getEffectiveVoice(c)}
+                  onChange={(e) => { setContactVoiceOverride(c.id, e.target.value); setVoiceTick(t => t + 1); }}
+                  className="flex-1 bg-[#0e1621] border border-[#1c2a3a] rounded-xl px-2 py-1.5 text-xs text-[#f5f5f5] focus:outline-none focus:border-[#2aabee] transition-colors"
+                >
+                  {ALIYUN_VOICE_OPTIONS.map(o => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+          <p className="text-[11px] text-[#5a6a7a] mt-1.5">为每位 AI 角色指定音色，默认按名字与头像自动分配</p>
         </div>
 
         <div className="flex gap-3 mt-5">
