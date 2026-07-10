@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { startRecording, stopRecording, supportsVoiceInput, setAsrErrorHandler } from '../services/speech';
+import { startRecording, stopRecording, supportsVoiceInput, setAsrErrorHandler, setAsrStatusHandler, getAsrModeLabel } from '../services/speech';
 
 export default function MessageInput({ onSend, disabled }) {
   const [text, setText] = useState('');
@@ -7,13 +7,15 @@ export default function MessageInput({ onSend, disabled }) {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [showTextInput, setShowTextInput] = useState(false);
   const [asrError, setAsrError] = useState('');
+  const [asrStatus, setAsrStatus] = useState({ mode: getAsrModeLabel(), phase: '待命', detail: '' });
   const recordingRef = useRef(false);
   const canRecord = supportsVoiceInput();
 
-  // 注册云端 ASR 错误回调：识别失败时把可读中文错误显示在输入框区域（红字）。
+  // 注册云端 ASR 错误回调 + 状态诊断回调
   useEffect(() => {
     setAsrErrorHandler((msg) => setAsrError(msg || ''));
-    return () => setAsrErrorHandler(null);
+    setAsrStatusHandler((status) => setAsrStatus((prev) => ({ ...prev, ...status })));
+    return () => { setAsrErrorHandler(null); setAsrStatusHandler(null); };
   }, []);
 
   const handleMicClick = useCallback(async () => {
@@ -26,6 +28,7 @@ export default function MessageInput({ onSend, disabled }) {
       return;
     }
     setAsrError(''); // 新一轮录音，清除上一次的错误提示
+    setAsrStatus((prev) => ({ ...prev, phase: '待命', detail: '' }));
     recordingRef.current = true; setIsRecording(true); setIsTranscribing(false);
     startRecording('en-US', null).catch(console.error).finally(() => {
       if (recordingRef.current) { recordingRef.current = false; setIsRecording(false); setIsTranscribing(false); }
@@ -36,6 +39,17 @@ export default function MessageInput({ onSend, disabled }) {
 
   return (
     <div className="bg-[#17212b] border-t border-[#1c2a3a] px-3 py-2">
+      {asrStatus && (asrStatus.mode || asrStatus.phase) && (
+        <div className="mb-2 px-3 py-1 bg-[#0e1621] rounded-lg flex items-center gap-1.5 fade-in">
+          <span className="text-[10px] text-[#5a6a7a]">语音</span>
+          <span className={`text-[10px] ${asrStatus.phase && asrStatus.phase.startsWith('失败') ? 'text-[#ff6b6b]' : (asrStatus.phase && ['录音中', '上传中', '识别中'].includes(asrStatus.phase)) ? 'text-[#2aabee]' : 'text-[#5a6a7a]'}`}>
+            {asrStatus.mode || '—'}
+            <span className="text-[#5a6a7a]"> · </span>
+            {asrStatus.phase || '待命'}
+            {asrStatus.detail ? <span className="text-[#5a6a7a]">（{asrStatus.detail}）</span> : null}
+          </span>
+        </div>
+      )}
       {isTranscribing && (
         <div className="mb-2 px-3 py-1.5 bg-[#0e1621] rounded-lg flex items-center gap-2 fade-in">
           <div className="w-3.5 h-3.5 border-2 border-[#2aabee]/30 border-t-[#2aabee] rounded-full animate-spin" />

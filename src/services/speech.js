@@ -42,6 +42,22 @@ function reportAsrError(msg) {
   if (asrErrorHandler) { try { asrErrorHandler(msg); } catch {} }
 }
 
+// --- Centralized ASR status reporting (always-on diagnostic bar) ---
+// Lets the app layer render a persistent status line (mode / phase / detail)
+// so the user can tell whether ASR is in cloud mode, recording, uploading,
+// recognizing, succeeded, or failed — even when no text ever comes back.
+let asrStatusHandler = null;
+export function setAsrStatusHandler(fn) {
+  if (typeof fn === 'function') asrStatusHandler = fn;
+  else asrStatusHandler = null;
+}
+// status: { mode?: string, phase?: string, detail?: string }
+function reportAsrStatus(status) {
+  if (asrStatusHandler && status) {
+    try { asrStatusHandler(status); } catch {}
+  }
+}
+
 let ttsMode = 'browser'; // 'browser' | 'edgetts'
 
 // --- Web Audio API playback (mobile-safe) ---
@@ -340,6 +356,7 @@ export async function startRecording(lang = 'en-US', onInterim = null) {
     // 麦克风权限被拒 / 设备无麦克风：必须给用户红字提示，绝不能再静默消失
     console.log('Mic permission denied:', e);
     reportAsrError('麦克风不可用：请允许麦克风权限后重试');
+    reportAsrStatus({ mode: getAsrModeLabel(), phase: '失败', detail: '麦克风权限被拒' });
     return { transcript: '', audioBlob: null };
   }
 
@@ -354,17 +371,20 @@ export async function startRecording(lang = 'en-US', onInterim = null) {
 
   const cloudUrlPresent = !!getCloudTtsUrl();
 
-  // --- SpeechRecognition (continuous, won't auto-stop on pauses) ---
-  // 注意：华为等无 GMS 设备的浏览器虽暴露 SpeechRecognition API，但 .start()
-  // 会报 "找不到 Google 语音引擎" 等错误。因此必须用 try-catch 包裹 .start()，
-  // 失败时清除 recognition 引用，让 stopRecording() 自动降级到云端 ASR 分支。
+  // --- SpeechRecognition（连续识别，不因停顿而自动停止）---
+  // 关键修复：只要配置了云端 ASR 地址，就完全跳过原生 Web Speech 的创建与启动，
+  // 绕开国产安卓"谎称支持原生识别却永不触发 onresult"的桩，避免静默失败。
+  // 仅在没有云端地址、且浏览器确实暴露 SpeechRecognition 时，才走原生识别。
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (recognition) {
     try { recognition.stop(); } catch {}
     recognition = null;
   }
 
-  if (SpeechRecognition) {
+  // 诊断条：先推送当前模式（云端 / 原生 / 不可用）
+  reportAsrStatus({ mode: getAsrModeLabel(), phase: '待命' });
+
+  if (!cloudUrlPresent && SpeechRecognition) {
     recognition = new SpeechRecognition();
     recognition.lang = lang;
     recognition.continuous = true;   // DON'T stop on silence — user controls stop
@@ -393,13 +413,12 @@ export async function startRecording(lang = 'en-US', onInterim = null) {
       // no-speech / audio-capture / aborted are normal during continuous recording
       // — don't stop, just log and keep going.
       // "service-not-allowed" / "network" 等表示引擎不可用（如华为无 GMS），
-      // 标记为无效，stopRecording 会降级到云端 ASR。
+      // 清除 recognition，让原生分支在 stopRecording 中按"无识别结果"安全收尾。
       console.log('SpeechRecognition event:', event.error);
       if (event.error === 'service-not-allowed' || event.error === 'no-speech' || event.error === 'audio-capture' || event.error === 'network') {
-        // 引擎不可用：停止识别实例，让下方 recordingUseCloud 判定走云端分支
+        // 引擎不可用：停止识别实例
         try { recognition.stop(); } catch {}
         recognition = null;
-        // 原生识别中途失效且云端可用：仅标记走云端分支，采集会在下方 setupCloudWavCapture 启动
       }
     };
 
@@ -417,18 +436,18 @@ export async function startRecording(lang = 'en-US', onInterim = null) {
     try {
       recognition.start();
     } catch (err) {
-      // .start() 同步抛异常（华为无 GMS 会走这里）：清除 recognition，
-      // stopRecording 中的 useCloud 判断 (!recognition) 会为 true → 走云端 ASR
-      console.warn('SpeechRecognition.start() 失败，将使用云端 ASR:', err?.message || err);
+      // 原生识别 .start() 同步抛异常：清除 recognition，原生分支将安全收尾（无识别结果）。
+      // 注意：走到这里的前提是"未配置云端地址"（否则不会创建 recognition），
+      // 因此不会误入云端分支。
+      console.warn('SpeechRecognition.start() 失败，原生分支将安全收尾:', err?.message || err);
       recognition = null;
     }
   }
 
-  // --- Decide capture method ---
-  // 原生识别可用（recognition 仍存活）→ MediaRecorder 录 webm 供桌面回放（保持原逻辑）。
-  // 原生识别不可用（华为无 GMS，recognition 为 null）且配置了云端 ASR →
-  // ScriptProcessor 实时采集单声道 PCM（绕过 MediaRecorder + decodeAudioData）。
-  recordingUseCloud = !recognition && cloudUrlPresent;
+  // --- 决定采集方式 ---
+  // 填了云端地址 → 走云端 ASR（录制 webm/opus 原样上传，由代理转码识别），绕开不可靠的原生识别。
+  // 没填云端地址但浏览器暴露原生 SpeechRecognition → 走原生识别（桌面/部分浏览器）。
+  recordingUseCloud = !!getCloudTtsUrl();
   if (recordingUseCloud) {
     // 云端模式：原生 MediaRecorder 录 webm/opus（移动端最稳），原样上传给代理转码
     await setupCloudWavCapture(recordingStream);
@@ -441,6 +460,9 @@ export async function startRecording(lang = 'en-US', onInterim = null) {
     };
     mediaRecorder.start();
   }
+
+  // 诊断条：已进入录音采集阶段
+  reportAsrStatus({ phase: '录音中', detail: recordingUseCloud ? '云端采集' : '原生采集' });
 
   // Return a Promise that only resolves when the user calls stopRecording()
   return new Promise((resolve) => {
@@ -463,9 +485,12 @@ export function stopRecording() {
     let resolved = false;
     let cloudTranscript = '';
 
-    // 云端识别模式：无原生 SpeechRecognition，但有云端 ASR 地址（华为等无 GMS 设备）。
-    // 此时 recognition 为 null，录音停止后把音频上传云端识别拿文本。
-    const useCloud = !recognition && !!getCloudTtsUrl();
+    // 诊断条：推送当前模式
+    reportAsrStatus({ mode: getAsrModeLabel() });
+
+    // 云端识别模式：只要配置了云端 ASR 地址就走云端（绕开不可靠的原生识别）。
+    // recognition 此时为 null（startRecording 已跳过原生识别创建）。
+    const useCloud = !!getCloudTtsUrl();
 
     const tryResolve = () => {
       if (resolved || !recorderStopped || !recognitionStopped) return;
@@ -489,6 +514,14 @@ export function stopRecording() {
       const transcript = useCloud
         ? (cloudTranscript || '').trim()
         : (finalTranscript.trim() || lastTranscript.trim());
+      // 诊断条：原生模式根据最终 transcript 标记成功/失败（云端模式在各分支已单独上报）
+      if (!useCloud) {
+        if (transcript) {
+          reportAsrStatus({ phase: '成功', detail: `识别到 ${transcript.length} 字` });
+        } else {
+          reportAsrStatus({ phase: '失败', detail: '原生无返回' });
+        }
+      }
       if (recordingResolve) {
         recordingResolve({ transcript, audioBlob });
         recordingResolve = null;
@@ -498,9 +531,14 @@ export function stopRecording() {
 
     // 安全超时：原生模式等 recognition 收尾（3s）；云端模式等上传+识别（15s）
     const safetyTimeout = setTimeout(() => {
-      // 云端模式超时兜底：给红字提示，绝不再静默消失
-      if (useCloud && !resolved) {
-        reportAsrError('语音识别超时，请重试');
+      // 超时兜底：无论云端还是原生，都必须给红字提示 + 诊断条，绝不再静默消失
+      if (!resolved) {
+        if (useCloud) {
+          reportAsrError('语音识别超时，请重试');
+        } else {
+          reportAsrError('原生语音识别失败，请改用云端识别或检查网络');
+        }
+        reportAsrStatus({ phase: '失败', detail: '超时' });
       }
       recorderStopped = true;
       recognitionStopped = true;
@@ -532,25 +570,30 @@ export function stopRecording() {
     if (useCloud) {
       // 云端模式：把采集到的 webm/opus Blob 原样交给代理，由代理 ffmpeg 转码成 WAV 再识别。
       // 前端不再做任何解码（彻底绕开华为浏览器解不开 webm/opus 的原罪）。
+      reportAsrStatus({ phase: '上传中', detail: '上传音频到云端' });
       cloudStopAndEncode()
         .then((wavBytes) => {
           if (!wavBytes) {
             // 没有采集到有效声音
             reportAsrError('没听到声音，请按住麦克风再说一次');
+            reportAsrStatus({ phase: '失败', detail: '没听到声音' });
             recorderStopped = true;
             tryResolve();
             return;
           }
+          reportAsrStatus({ phase: '识别中', detail: '云端识别中' });
           return cloudAsr(wavBytes).then((t) => {
             if (!t || !t.trim()) {
               // 代理返回空：采到静音 / 没识别到 → 给红字提示，而不是静默消失
               // （这正是「转盘动画完成后直接消失、没有任何反应」的用户现象根因）
               reportAsrError('没听清，请再说一次（没识别到文字）');
+              reportAsrStatus({ phase: '失败', detail: '没识别到文字' });
               recorderStopped = true;
               tryResolve();
               return;
             }
             cloudTranscript = t;
+            reportAsrStatus({ phase: '成功', detail: `识别到 ${t.trim().length} 字` });
             recorderStopped = true;
             tryResolve();
           });
@@ -559,6 +602,7 @@ export function stopRecording() {
           const msg = classifyAsrError(e);
           reportAsrError(msg);
           console.error('云端 ASR 失败:', e);
+          reportAsrStatus({ phase: '失败', detail: msg });
           recorderStopped = true;
           cloudTranscript = '';
           tryResolve();
@@ -870,16 +914,16 @@ export const SPEED_PRESETS = [
 
 // 把 ASR 异常归类为用户可读的中文提示
 function classifyAsrError(e) {
-  if (!e) return '语音识别失败，请重试';
+  if (!e) return '云端语音识别失败，请重试';
   const msg = e.message || String(e);
-  // AbortSignal.timeout 抛出的 DOMException，name 为 'TimeoutError'
-  if (e.name === 'TimeoutError') return '语音识别网络超时，请重试';
-  // fetch 网络层失败（CORS 被拒 / 服务端不可达 / 断网）
-  if (/Failed to fetch|NetworkError|network|网络/i.test(msg)) return '语音识别网络超时，请重试';
-  // 代理返回 HTTP 错误且无透传信息：原样展示状态码提示
+  // 代理已在 cloudAsr 中带上 "云端语音识别失败（HTTP xxx）：" 前缀，原样透传即可
   if (/HTTP \d+/i.test(msg)) return msg;
+  // fetch 网络层失败 / AbortSignal 超时（CORS 被拒 / 服务端不可达 / 断网 / 超时）
+  if (e.name === 'TimeoutError' || /Failed to fetch|NetworkError|network|网络|fetch/i.test(msg)) {
+    return '云端语音识别连接失败：网络异常或代理地址错误，请检查「云端TTS/ASR地址」设置';
+  }
   // 其余（含代理透传的错误信息）直接展示
-  return msg || '语音识别失败，请重试';
+  return msg || '云端语音识别失败，请重试';
 }
 
 // 云端模式采集：直接用原生 MediaRecorder 录 audio/webm;codecs=opus（见下方 setupCloudWavCapture）。
@@ -979,16 +1023,23 @@ export async function cloudAsr(audioBlob) {
     signal: AbortSignal.timeout(12000),
   });
   if (!res.ok) {
-    // 代理透传的错误信息（j.error）优先；否则给出 HTTP 状态提示
-    let msg = `语音识别服务返回错误 (HTTP ${res.status})`;
+    // 代理透传的错误信息（j.error）优先；否则给出带前缀的 HTTP 状态提示
+    let info = `HTTP ${res.status}`;
     try {
       const j = await res.json();
-      if (j && j.error) msg = j.error;
+      if (j && j.error) info = j.error;
     } catch {}
-    throw new Error(msg);
+    throw new Error(`云端语音识别失败（${info}）`);
   }
   const json = await res.json();
   return (json && json.result) || '';
+}
+
+// 返回当前语音识别模式的可读中文标签（供诊断条常驻显示）
+export function getAsrModeLabel() {
+  if (getCloudTtsUrl()) return '云端识别模式';
+  if (supportsSpeechRecognition()) return '原生识别模式';
+  return '语音不可用';
 }
 
 // 是否支持语音输入：原生 SpeechRecognition 可用，或已配置云端 ASR 地址
