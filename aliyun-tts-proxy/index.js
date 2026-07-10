@@ -14,6 +14,10 @@
 const https = require('https');
 const crypto = require('crypto');
 const { URLSearchParams } = require('url');
+const { spawn } = require('child_process');
+// ffmpeg-static 自带预编译二进制：FC Node.js 运行时安装依赖后可直接 require 拿到二进制路径，
+// 无需系统 apt / 额外安装。用于把前端上传的 opus/webm 音频转码成 NLS 要求的 16k/16bit/mono WAV。
+const ffmpeg = require('ffmpeg-static');
 
 const REGION = process.env.ALIYUN_REGION || 'cn-shanghai';
 const APPKEY = process.env.ALIYUN_APPKEY || '';
@@ -152,6 +156,55 @@ function httpsPostBuffer(urlStr, bodyBuffer, contentType, timeoutMs = 30000, ext
     req.setTimeout(timeoutMs, () => req.destroy(new Error('请求超时')));
     req.write(bodyBuffer);
     req.end();
+  });
+}
+
+// --- ffmpeg 转码：把任意前端音频（opus/webm 等）转成 NLS 要求的 16k/16bit/mono WAV ---
+// 前端不再做解码/重采样，原样上传 opus/webm；后端用 ffmpeg-static 转码后再送阿里云。
+function detectFfmpegFormat(buf) {
+  // 根据魔数猜测封装格式，给 ffmpeg 一个明确的 -f 提示（stdin 无扩展名时尤其有用）
+  if (buf.length >= 4 && buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) return 'webm';
+  if (buf.length >= 4 && buf.toString('latin1', 0, 4) === 'OggS') return 'ogg';
+  return ''; // 让 ffmpeg 自行探测（含 WAV/RIFF 等情况）
+}
+
+function transcodeToWav(inputBuffer, forcedFmt = '') {
+  return new Promise((resolve, reject) => {
+    if (!ffmpeg) {
+      reject(new Error('ffmpeg 不可用：请在函数目录执行 npm install ffmpeg-static 后重新部署'));
+      return;
+    }
+    const args = ['-hide_banner', '-loglevel', 'error'];
+    if (forcedFmt) args.push('-f', forcedFmt);
+    args.push('-i', 'pipe:0');
+    args.push('-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 'wav', 'pipe:1');
+    let proc;
+    try {
+      proc = spawn(ffmpeg, args);
+    } catch (e) {
+      reject(new Error('ffmpeg 启动失败：' + (e && e.message ? e.message : e) + '（确认已 npm install ffmpeg-static 且二进制有执行权限）'));
+      return;
+    }
+    const out = [];
+    const errOut = [];
+    proc.stdout.on('data', (c) => out.push(c));
+    proc.stderr.on('data', (c) => errOut.push(c));
+    proc.on('error', (e) => reject(new Error('ffmpeg 进程错误：' + (e && e.message ? e.message : e))));
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error('ffmpeg 转码失败 (code=' + code + ')：' + Buffer.concat(errOut).toString('utf8').slice(0, 600)));
+        return;
+      }
+      const buf = Buffer.concat(out);
+      if (!buf || buf.length < 44) {
+        reject(new Error('ffmpeg 未输出有效 WAV（音频可能为空或损坏）'));
+        return;
+      }
+      resolve(buf);
+    });
+    proc.stdin.on('error', () => {}); // 忽略对端提前关闭
+    proc.stdin.write(inputBuffer);
+    proc.stdin.end();
   });
 }
 
@@ -392,9 +445,16 @@ module.exports.handler = async function (event, context, callback) {
       return send(callback, 400, { 'Content-Type': 'application/json' }, JSON.stringify({ error: '音频为空' }));
     }
     try {
-      const text = await recognizeChunk(bodyBuf);
+      // 兼容旧版前端：若已是 WAV（RIFF 头）则直接识别；否则用 ffmpeg 转码成标准 WAV。
+      let wavBuf = bodyBuf;
+      if (bodyBuf.slice(0, 4).toString('latin1') !== 'RIFF') {
+        const fmt = detectFfmpegFormat(bodyBuf);
+        wavBuf = await transcodeToWav(bodyBuf, fmt);
+      }
+      const text = await recognizeChunk(wavBuf);
       return send(callback, 200, { 'Content-Type': 'application/json' }, JSON.stringify({ result: text }));
     } catch (err) {
+      // ffmpeg 转码失败 / NLS 调用失败都透传清晰错误信息，前端据此显示红字
       return send(
         callback,
         500,
