@@ -4,7 +4,7 @@ import MessageInput from './MessageInput';
 import { chatWithAI, reviewConversation } from '../services/gemini';
 import { speakText, stopSpeaking, SPEED_PRESETS } from '../services/speech';
 import { DIFFICULTY_PRESETS, getContactDifficulty, setContactDifficulty } from '../data/contacts';
-import { getEffectiveVoice } from '../data/voices';
+import { getEffectiveVoice, ALIYUN_VOICE_OPTIONS, setContactVoiceOverride } from '../data/voices';
 import { fingerprintOf, findCached, saveReview, clearReviews } from '../services/reviewStore';
 import { searchImage, cleanQuery } from '../services/imageService';
 
@@ -54,6 +54,7 @@ export default function ChatView({ contact, messages, setMessages, apiKey, userA
   const [showSettings, setShowSettings] = useState(false);
   const [difficulty, setDifficulty] = useState(() => getContactDifficulty(contact.id));
   const [generating, setGenerating] = useState(false);
+  const [voiceTick, setVoiceTick] = useState(0);
   const chatEndRef = useRef(null);
   const initializedRef = useRef(false);
 
@@ -278,6 +279,17 @@ export default function ChatView({ contact, messages, setMessages, apiKey, userA
                     </button>
                   ))}
                 </div>
+                <div className="text-[11px] text-[#707579] mb-1.5 font-medium">Voice</div>
+                <select
+                  key={`voice-${voiceTick}`}
+                  value={getEffectiveVoice(contact)}
+                  onChange={(e) => { setContactVoiceOverride(contact.id, e.target.value); setVoiceTick(t => t + 1); }}
+                  className="w-full bg-[#0e1621] border border-[#1c2a3a] rounded-xl px-2 py-1.5 text-[11px] text-[#f5f5f5] focus:outline-none focus:border-[#2aabee] transition-colors mb-3"
+                >
+                  {ALIYUN_VOICE_OPTIONS.map(o => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
                 <div className="pt-2 border-t border-[#1c2a3a]">
                   <button onClick={() => { if (confirm('Clear chat history?')) { localStorage.removeItem(`speakup_msgs_${contact.id}`); clearReviews(contact.id); setMessages([]); setShowSettings(false); }}}
                     className="w-full py-1.5 text-[11px] text-[#e74c3c] hover:bg-[#e74c3c]/10 rounded-lg transition-colors">
