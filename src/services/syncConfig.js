@@ -12,9 +12,9 @@ export const SYNC_CODE_KEY = 'speakup_sync_code';
 // localStorage key：同步代理地址覆盖（与 speakup_cloud_tts_url 同模式）
 export const SYNC_PROXY_URL_KEY = 'speakup_sync_proxy_url';
 
-// 同步代理默认占位（用户部署 FC 后填写真实地址，或用上面的 key 覆盖）。
-// 含 <...> 占位符，getProxyUrl 读取到时视为「未配置」，不会发起请求。
-export const SYNC_PROXY_URL = 'https://<your-sync-proxy>.cn-hangzhou.fcapp.run';
+// 同步代理默认地址（已部署的阿里云 FC 函数，无需认证 + CORS*）。
+// 仍可用 speakup_sync_proxy_url 覆盖；若此处地址变更，用户可在「设置→数据同步」重新填入。
+export const SYNC_PROXY_URL = 'https://aliyun-nc-proxy-fxiiveelsb.cn-hangzhou.fcapp.run';
 
 // 防抖上传窗口（毫秒）
 export const DEBOUNCE_MS = 2000;
