@@ -1,6 +1,8 @@
 // Speech service: Web Speech API (free) + optional Edge-TTS (natural voices)
 // Edge-TTS provides much more natural English voices via a local Python server
 
+import { getVoiceProvider } from '../data/voices';
+
 // --- Cloud ASR (华为 / 无 GMS 安卓手机语音输入) ---
 // 关键修复（绕过全部移动端音频 API 的坑）：前端只做"最稳的原生采集 + 原样上传"，
 // 不做任何解码 / 重采样 / WAV 编码。直接用原生 MediaRecorder 录 audio/webm;codecs=opus
@@ -277,7 +279,7 @@ async function edgeTtsSpeak(text, voiceName, rate) {
  * @param {string} voiceName - Edge-TTS voice name (e.g. en-US-JennyNeural)
  * @param {number} rate - Speed as a float multiplier (e.g. 0.75 → "-25%")
  */
-export async function cloudTtsSpeak(text, voiceName, rate) {
+export async function cloudTtsSpeak(text, voiceName, rate, provider) {
   const cloudUrl = getCloudTtsUrl();
   if (!cloudUrl) { reportTtsError('未配置云端 TTS 地址'); return; }
 
@@ -291,6 +293,9 @@ export async function cloudTtsSpeak(text, voiceName, rate) {
     const pct = Math.round((rate - 1) * 100);
     params.set('rate', `${pct >= 0 ? '+' : ''}${pct}%`);
   }
+  // 仅播音腔等需要强制 NLS 老风格的音色才显式追加 provider=nls；
+  // 其余情况不追加，让代理沿用全局 TTS_PROVIDER（保留"全局开关"语义）。
+  if (provider === 'nls') params.set('provider', 'nls');
 
   speaking = true;
   try {
@@ -823,7 +828,12 @@ export async function speakText(text, opts = {}) {
   const cloudUrl = getCloudTtsUrl();
   if (cloudUrl) {
     try {
-      await cloudTtsSpeak(text, voiceName || 'en-US-JennyNeural', speed);
+      await cloudTtsSpeak(
+        text,
+        voiceName || 'en-US-JennyNeural',
+        speed,
+        getVoiceProvider(voiceName),
+      );
       return;
     } catch (e) {
       console.warn('Cloud TTS 失败，回退到浏览器语音:', e?.message || e);

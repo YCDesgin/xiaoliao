@@ -19,20 +19,23 @@ beforeEach(() => {
 });
 
 describe('voices — CosyVoice 占位映射 (T03)', () => {
-  it('ALIYUN_VOICE_OPTIONS 每项含 cosyVoiceId 字段', () => {
+  it('ALIYUN_VOICE_OPTIONS — CosyVoice 音色每项含 cosyVoiceId 字段', () => {
     ALIYUN_VOICE_OPTIONS.forEach((o) => {
       expect(o).toHaveProperty('value');
-      expect(o).toHaveProperty('cosyVoiceId');
-      expect(typeof o.cosyVoiceId).toBe('string');
+      // 播音腔(nls) 无 cosyVoiceId；仅 CosyVoice 音色带 cosyVoiceId。
+      if (o.provider !== 'nls') {
+        expect(o).toHaveProperty('cosyVoiceId');
+        expect(typeof o.cosyVoiceId).toBe('string');
+      }
     });
   });
 
-  it('getCosyVoiceId 返回初值占位（用户尚未填真实 id）', () => {
-    expect(getCosyVoiceId('cally')).toBe('');
-    expect(getCosyVoiceId('abby')).toBe('');
-    expect(getCosyVoiceId('andy')).toBe('');
-    expect(getCosyVoiceId('harry')).toBe('');
-    expect(getCosyVoiceId('eric')).toBe('');
+  it('getCosyVoiceId 返回内置默认英文音色映射（性别/口音对齐，loong*）', () => {
+    expect(getCosyVoiceId('cally')).toBe('loongcally_v3');
+    expect(getCosyVoiceId('abby')).toBe('loongabby_v3');
+    expect(getCosyVoiceId('andy')).toBe('loongandy_v3');
+    expect(getCosyVoiceId('harry')).toBe('loongluca_v3');
+    expect(getCosyVoiceId('eric')).toBe('loongeric_v3');
   });
 
   it('getCosyVoiceId 未知名 → 返回 ""', () => {

@@ -159,3 +159,13 @@ test('TTS_PROVIDER 默认 nls（行为不变 / 兜底），CosyVoice 映射含 5
   assert.strictEqual(proxy.__test.COSYVOICE_DEFAULT_VOICE_MAP.cally, 'loongcally_v3');
   assert.strictEqual(proxy.__test.COSYVOICE_DEFAULT_VOICE_MAP.eric, 'loongeric_v3');
 });
+
+test('每音色指定服务商 — BROADCAST_VOICES 含两项播音腔', () => {
+  assert.ok(Array.isArray(proxy.BROADCAST_VOICES));
+  assert.deepStrictEqual(proxy.BROADCAST_VOICES, ['broadcast_female', 'broadcast_male']);
+});
+
+test('每音色指定服务商 — NLS_VOICE_ALIAS 映射播音腔到实际 NLS 发音人', () => {
+  assert.strictEqual(proxy.NLS_VOICE_ALIAS.broadcast_female, 'cally');
+  assert.strictEqual(proxy.NLS_VOICE_ALIAS.broadcast_male, 'andy');
+});

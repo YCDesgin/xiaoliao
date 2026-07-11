@@ -8,7 +8,15 @@
 // 「按名字+头像自动分配 + 可手动覆盖」逻辑，保证各 AI 角色默认就不同声。
 
 /** 后端支持的阿里云英文发音人（必须与 aliyun-tts-proxy 的 KNOWN_EN_VOICES 保持一致） */
-export const KNOWN_EN_VOICES = ['cally', 'abby', 'andy', 'harry', 'eric'];
+export const KNOWN_EN_VOICES = [
+  'cally',
+  'abby',
+  'andy',
+  'harry',
+  'eric',
+  'broadcast_female',
+  'broadcast_male',
+];
 
 /**
  * 每个发音人的中文标签与性别 hint（供 UI 下拉与默认分配使用）。
@@ -17,19 +25,25 @@ export const KNOWN_EN_VOICES = ['cally', 'abby', 'andy', 'harry', 'eric'];
  * 云端仍可用环境变量 COSYVOICE_VOICE_MAP 整体覆盖这些默认值（在后端生效）。
  */
 export const ALIYUN_VOICE_OPTIONS = [
-  { value: 'cally', label: 'Cally（女）', gender: 'female', cosyVoiceId: 'loongcally_v3' },
-  { value: 'abby', label: 'Abby（女）', gender: 'female', cosyVoiceId: 'loongabby_v3' },
-  { value: 'andy', label: 'Andy（男）', gender: 'male', cosyVoiceId: 'loongandy_v3' },
-  { value: 'harry', label: 'Harry（男）', gender: 'male', cosyVoiceId: 'loongluca_v3' },
-  { value: 'eric', label: 'Eric（男）', gender: 'male', cosyVoiceId: 'loongeric_v3' },
+  { value: 'broadcast_female', label: '播音腔（女）', gender: 'female', provider: 'nls' },
+  { value: 'broadcast_male', label: '播音腔（男）', gender: 'male', provider: 'nls' },
+  { value: 'cally', label: 'Cally（女）', gender: 'female', cosyVoiceId: 'loongcally_v3', provider: 'cosyvoice' },
+  { value: 'abby', label: 'Abby（女）', gender: 'female', cosyVoiceId: 'loongabby_v3', provider: 'cosyvoice' },
+  { value: 'andy', label: 'Andy（男）', gender: 'male', cosyVoiceId: 'loongandy_v3', provider: 'cosyvoice' },
+  { value: 'harry', label: 'Harry（男）', gender: 'male', cosyVoiceId: 'loongluca_v3', provider: 'cosyvoice' },
+  { value: 'eric', label: 'Eric（男）', gender: 'male', cosyVoiceId: 'loongeric_v3', provider: 'cosyvoice' },
 ];
 
-const FEMALE_VOICES = KNOWN_EN_VOICES.filter(
-  (v) => ALIYUN_VOICE_OPTIONS.find((o) => o.value === v)?.gender === 'female',
-);
-const MALE_VOICES = KNOWN_EN_VOICES.filter(
-  (v) => ALIYUN_VOICE_OPTIONS.find((o) => o.value === v)?.gender === 'male',
-);
+// assignDefaultVoice 自动分配池：排除 provider === 'nls' 的播音腔音色，
+// 保证 AI 角色默认分配只在 5 个 CosyVoice 音色里选，不会自动分到播音腔。
+const FEMALE_VOICES = KNOWN_EN_VOICES.filter((v) => {
+  const o = ALIYUN_VOICE_OPTIONS.find((opt) => opt.value === v);
+  return o?.gender === 'female' && o.provider !== 'nls';
+});
+const MALE_VOICES = KNOWN_EN_VOICES.filter((v) => {
+  const o = ALIYUN_VOICE_OPTIONS.find((opt) => opt.value === v);
+  return o?.gender === 'male' && o.provider !== 'nls';
+});
 
 // 已分配音色登记表（按 contact.id 或 name 去重，保证静态角色默认不同声）。
 // 关键点：assignDefaultVoice 对同一个 contact 幂等 —— 重复调用返回相同结果，
@@ -143,6 +157,18 @@ export function getEffectiveVoice(contact) {
  */
 export function getCosyVoiceId(aliyunVoice) {
   return ALIYUN_VOICE_OPTIONS.find((o) => o.value === aliyunVoice)?.cosyVoiceId || '';
+}
+
+/**
+ * 返回某发音人的服务商：'cosyvoice' | 'nls'。
+ * 播音腔（broadcast_*）强制走 nls 老风格；其余默认 cosyvoice（升级语音）。
+ * 供 cloudTtsSpeak 透传 provider 参数，使全局 TTS_PROVIDER 为 cosyvoice 时，
+ * 播音腔仍走 NLS 老风格。
+ * @param {string} voice 发音人名（如 'cally' / 'broadcast_female'）
+ * @returns {'cosyvoice' | 'nls'}
+ */
+export function getVoiceProvider(voice) {
+  return ALIYUN_VOICE_OPTIONS.find((o) => o.value === voice)?.provider || 'cosyvoice';
 }
 
 /**

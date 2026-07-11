@@ -24,31 +24,48 @@ import {
   getEffectiveVoice,
 } from '../data/voices';
 
-const MALE_VOICES = KNOWN_EN_VOICES.filter(
-  (v) => ALIYUN_VOICE_OPTIONS.find((o) => o.value === v)?.gender === 'male',
-);
-const FEMALE_VOICES = KNOWN_EN_VOICES.filter(
-  (v) => ALIYUN_VOICE_OPTIONS.find((o) => o.value === v)?.gender === 'female',
-);
+const MALE_VOICES = KNOWN_EN_VOICES.filter((v) => {
+  const o = ALIYUN_VOICE_OPTIONS.find((opt) => opt.value === v);
+  return o?.gender === 'male' && o.provider !== 'nls';
+});
+const FEMALE_VOICES = KNOWN_EN_VOICES.filter((v) => {
+  const o = ALIYUN_VOICE_OPTIONS.find((opt) => opt.value === v);
+  return o?.gender === 'female' && o.provider !== 'nls';
+});
 
 beforeEach(() => {
   localStorage.clear();
 });
 
 describe('module constants', () => {
-  it('KNOWN_EN_VOICES matches the backend Aliyun NLS pool', () => {
-    expect(KNOWN_EN_VOICES).toEqual(['cally', 'abby', 'andy', 'harry', 'eric']);
+  it('KNOWN_EN_VOICES matches the backend Aliyun NLS pool (2 播音腔 + 5 CosyVoice)', () => {
+    expect(KNOWN_EN_VOICES).toEqual([
+      'cally',
+      'abby',
+      'andy',
+      'harry',
+      'eric',
+      'broadcast_female',
+      'broadcast_male',
+    ]);
   });
 
-  it('ALIYUN_VOICE_OPTIONS lists every known voice with a gender + label', () => {
+  it('ALIYUN_VOICE_OPTIONS lists every known voice with a gender + label + provider', () => {
     expect(ALIYUN_VOICE_OPTIONS.map((o) => o.value).sort()).toEqual(
       [...KNOWN_EN_VOICES].sort(),
     );
+    // 共 7 项，每项都带 provider（cosyvoice / nls）
+    expect(ALIYUN_VOICE_OPTIONS).toHaveLength(7);
     ALIYUN_VOICE_OPTIONS.forEach((o) => {
       expect(['male', 'female']).toContain(o.gender);
       expect(typeof o.label).toBe('string');
       expect(o.label.length).toBeGreaterThan(0);
+      expect(['cosyvoice', 'nls']).toContain(o.provider);
     });
+    // 播音腔为 nls，其余为 cosyvoice
+    expect(ALIYUN_VOICE_OPTIONS.find((o) => o.value === 'broadcast_female').provider).toBe('nls');
+    expect(ALIYUN_VOICE_OPTIONS.find((o) => o.value === 'broadcast_male').provider).toBe('nls');
+    expect(ALIYUN_VOICE_OPTIONS.find((o) => o.value === 'cally').provider).toBe('cosyvoice');
     // exactly two female, three male — mirrors the male/female pools used below
     expect(FEMALE_VOICES).toEqual(['cally', 'abby']);
     expect(MALE_VOICES).toEqual(['andy', 'harry', 'eric']);

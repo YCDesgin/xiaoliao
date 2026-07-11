@@ -29,7 +29,12 @@ const AK_SECRET = process.env.ALIYUN_ACCESS_KEY_SECRET || '';
 const DEFAULT_VOICE = process.env.DEFAULT_VOICE || 'cally';
 
 // 阿里云 NLS 可用英文发音人（仅这些名称会直接采用，其余回退 DEFAULT_VOICE）
-const KNOWN_EN_VOICES = ['cally', 'abby', 'andy', 'harry', 'eric'];
+const KNOWN_EN_VOICES = ['cally', 'abby', 'andy', 'harry', 'eric', 'broadcast_female', 'broadcast_male'];
+
+// 播音腔音色：强制走 NLS 老风格，即使全局 TTS_PROVIDER=cosyvoice 也不走 CosyVoice。
+const BROADCAST_VOICES = ['broadcast_female', 'broadcast_male'];
+// 播音腔 → 实际 NLS 英文发音人（NLS 直接用阿里云发音人名作 voice 参数，见 synthesizeChunk 的 q.set('voice', voice)）。
+const NLS_VOICE_ALIAS = { broadcast_female: 'cally', broadcast_male: 'andy' };
 
 // --- CosyVoice（百炼）配置（功能2：更逼真的 TTS）---
 // 默认仍走 NLS（兜底/生产）；设置 TTS_PROVIDER=cosyvoice 后切换到百炼 CosyVoice。
@@ -449,6 +454,8 @@ const VOICE_LABELS = {
   andy: 'Andy (美式男声)',
   harry: 'Harry (英式男声)',
   eric: 'Eric (英式男声)',
+  broadcast_female: '播音腔（女）',
+  broadcast_male: '播音腔（男）',
 };
 
 // --- FC HTTP 触发器入口 ---
@@ -495,6 +502,8 @@ function collectPath(e) {
   );
 }
 
+module.exports.BROADCAST_VOICES = BROADCAST_VOICES;
+module.exports.NLS_VOICE_ALIAS = NLS_VOICE_ALIAS;
 module.exports.handler = async function (event, context, callback) {
   let e = event;
   // FC HTTP 触发器可能把 event 作为 Buffer 传入（而非字符串/对象），需先转字符串再 JSON.parse
@@ -547,6 +556,9 @@ module.exports.handler = async function (event, context, callback) {
 
     const reqVoice = (qs.voice || '').toLowerCase();
     const voice = KNOWN_EN_VOICES.includes(reqVoice) ? reqVoice : DEFAULT_VOICE;
+    // 播音腔音色（broadcast_*）或前端显式 provider=nls → 强制走 NLS 老风格，
+    // 即使全局 TTS_PROVIDER=cosyvoice 也绕过 CosyVoice。
+    const forceNls = qs.provider === 'nls' || BROADCAST_VOICES.includes(voice);
 
     // 语速：app 传 "±N%"（相对百分比），换算为倍率 speed（供 CosyVoice 直接使用）
     let speed = 1;
@@ -558,7 +570,7 @@ module.exports.handler = async function (event, context, callback) {
 
     try {
       let audio;
-      if (TTS_PROVIDER === 'cosyvoice') {
+      if (!forceNls && TTS_PROVIDER === 'cosyvoice') {
         // 功能2：百炼 CosyVoice；始终解析到非空音色 id（默认英文音色 loong*），保证请求体带 voice。
         const cosyVoiceId = resolveCosyVoiceId(voice);
         try {
@@ -568,16 +580,17 @@ module.exports.handler = async function (event, context, callback) {
           if (AK_ID && AK_SECRET && APPKEY) {
             console.error('[CosyVoice 失败，回退 NLS]:', cvErr && cvErr.message);
             const parts = [];
-            for (const c of splitText(text, 280)) parts.push(await synthesizeChunk(c, voice, speechRate));
+            for (const c of splitText(text, 280)) parts.push(await synthesizeChunk(c, NLS_VOICE_ALIAS[voice] || voice, speechRate));
             audio = Buffer.concat(parts);
           } else {
             throw cvErr;
           }
         }
       } else {
-        // 默认 / 兜底：阿里云 NLS（行为完全不变）。
+        // 默认 / 兜底 / 播音腔强制：阿里云 NLS（行为完全不变）。
+        // 播音腔音色用 NLS_VOICE_ALIAS 映射到真实 NLS 发音人（andy/cally）。
         const parts = [];
-        for (const c of splitText(text, 280)) parts.push(await synthesizeChunk(c, voice, speechRate));
+        for (const c of splitText(text, 280)) parts.push(await synthesizeChunk(c, NLS_VOICE_ALIAS[voice] || voice, speechRate));
         audio = Buffer.concat(parts);
       }
       return send(
