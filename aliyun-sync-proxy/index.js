@@ -153,9 +153,13 @@ module.exports.handler = async function (event, context, callback) {
 
     if (op === 'list') {
       const list = await oss.list({ prefix: `${syncId}/`, delimiter: '/' });
+      // 先剥离命名空间前缀，再过滤掉鉴权元数据文件 .meta.json，
+      // 最后才去掉 .json 后缀 —— 顺序很重要：若先去后缀，".meta.json" 会变成
+      // ".meta"，后续的 n !== '.meta.json' 过滤就失效，导致元数据泄漏进联系人列表。
       const contacts = (list.objects || [])
-        .map((o) => o.name.replace(`${syncId}/`, '').replace(/\.json$/, ''))
-        .filter((n) => n && n !== '.meta.json');
+        .map((o) => o.name.replace(`${syncId}/`, ''))
+        .filter((n) => n && n !== '.meta.json')
+        .map((n) => n.replace(/\.json$/, ''));
       return send(callback, 200, { 'Content-Type': 'application/json' }, { contacts });
     }
 
