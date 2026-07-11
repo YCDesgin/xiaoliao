@@ -332,8 +332,12 @@ export async function cloudTtsSpeak(text, voiceName, rate) {
   } catch (e) {
     // Network / status / empty-audio errors above were already reported via
     // reportTtsError before being thrown; only log the throw here so the stack
-    // is visible in devtools. speakText()'s catch will fall back to browser TTS.
+    // is visible in devtools. Crucially we re-throw so the caller's
+    // .catch() / try-catch fallback fires (speakWord -> speakBrowserWord,
+    // speakText -> browser TTS). Without the throw this resolves undefined and
+    // the "any failure falls back to browser" contract is violated.
     console.error('Cloud TTS playback error:', e);
+    throw e;
   } finally {
     speaking = false;
   }
