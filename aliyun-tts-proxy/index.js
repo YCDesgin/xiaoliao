@@ -12,6 +12,7 @@
 // （华为无 GMS，浏览器原生 SpeechRecognition 不可用，故识别也走云端）。
 
 const https = require('https');
+const http = require('http');
 const crypto = require('crypto');
 const { URLSearchParams } = require('url');
 const { spawn } = require('child_process');
@@ -39,6 +40,7 @@ const COSYVOICE_MODEL = process.env.COSYVOICE_MODEL || 'cosyvoice-v3-flash';
 // 与前端 src/data/voices.js 的 cosyVoiceId 保持一致；初值占位 ''，由用户在百炼试听后填真实 id。
 // 也可通过环境变量 COSYVOICE_VOICE_MAP（JSON 字符串）整体覆盖，例如：
 //   {"cally":"<id>","abby":"<id>","andy":"<id>","harry":"<id>","eric":"<id>"}
+// （环境变量的覆盖会在下方加载时合并进 COSYVOICE_VOICE_MAP，resolveCosyVoiceId 直接查表即可。）
 let COSYVOICE_VOICE_MAP = { cally: '', abby: '', andy: '', harry: '', eric: '' };
 try {
   if (process.env.COSYVOICE_VOICE_MAP) {
@@ -51,6 +53,28 @@ try {
   // 环境变量非合法 JSON：沿用代码内占位，不阻断启动。
   console.error('[CosyVoice] COSYVOICE_VOICE_MAP 解析失败，沿用代码内占位:', e && e.message);
 }
+
+// CosyVoice v3 纯英文音色默认值（官方出海营销系列，性别/口音对齐）。
+// 兜底：即便 COSYVOICE_VOICE_MAP 未配置真实 id，也保证请求体始终带非空 voice（空 voice 会 418）。
+const COSYVOICE_DEFAULT_VOICE_MAP = {
+  cally: 'loongcally_v3', // 美式女声
+  abby:  'loongabby_v3', // 美式女声
+  andy:  'loongandy_v3', // 美式男声
+  harry: 'loongluca_v3', // 英式男声
+  eric:  'loongeric_v3', // 英式男声
+};
+
+/**
+ * 解析发音人对应的 CosyVoice 音色 id。
+ * 优先级：合并后的 COSYVOICE_VOICE_MAP（含环境变量覆盖） > 内置默认英文音色 > 兜底 loongcally_v3。
+ * 保证始终返回非空 id，使请求体必带 voice 字段，避免空 voice 触发的 418。
+ * @param {string} voice 阿里云发音人名（cally/abby/andy/harry/eric）
+ * @returns {string} 非空 CosyVoice 音色 id
+ */
+function resolveCosyVoiceId(voice) {
+  return COSYVOICE_VOICE_MAP[voice] || COSYVOICE_DEFAULT_VOICE_MAP[voice] || 'loongcally_v3';
+}
+
 const DASHSCOPE_TTS_URL = 'https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer';
 
 const META_HOST = `nls-meta.${REGION}.aliyuncs.com`;
@@ -78,6 +102,21 @@ function httpsGet(urlStr, timeoutMs = 20000) {
     });
     req.on('error', reject);
     req.setTimeout(timeoutMs, () => req.destroy(new Error('请求超时')));
+  });
+}
+
+// --- 协议感知的音频下载（OSS 预签名地址可能为 http:// 或 https://）---
+// 注意：原有的 httpsGet 只支持 https，不要复用它拉取 OSS 音频地址。
+function fetchUrl(urlStr, timeoutMs = 20000) {
+  const mod = urlStr.startsWith('https') ? https : http;
+  return new Promise((resolve, reject) => {
+    const req = mod.get(urlStr, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('下载音频超时')));
   });
 }
 
@@ -320,9 +359,11 @@ function buildCosyVoicePayload(text, cosyVoiceId, speed, model) {
 /**
  * 从 DashScope 响应中解析 mp3 音频 Buffer。
  * 兼容非流式 JSON（output.audio 字段）与流式 SSE（逐行 data: {...}）。
+ * 非流式下：audio 为字符串时按 base64 解码（兼容旧格式）；audio 为对象时取其
+ * 预签名 url（OSS 地址，可能是 http://）并下载真实 mp3 字节。
  * 导出仅供单测（架构 T9）。
  */
-function extractCosyVoiceAudio(res) {
+async function extractCosyVoiceAudio(res) {
   const ct = res.contentType || '';
   // 流式（SSE）：逐行拼接 output.audio
   if (ct.includes('text/event-stream')) {
@@ -355,7 +396,11 @@ function extractCosyVoiceAudio(res) {
   }
   const audio = data.output && data.output.audio;
   if (!audio) throw new Error('CosyVoice 响应缺少 audio 字段');
-  return Buffer.from(audio, 'base64');
+  // 兼容旧 base64 格式（audio 为字符串）
+  if (typeof audio === 'string') return Buffer.from(audio, 'base64');
+  // 真实格式（cosyvoice-v3-flash 非流式）：audio 为对象，音频二进制只在预签名 url 中
+  if (audio && typeof audio === 'object' && audio.url) return await fetchUrl(audio.url);
+  throw new Error('CosyVoice 响应缺少 audio 字段');
 }
 
 // 发送 JSON 的便捷封装（复用 httpsPostBuffer）。
@@ -384,7 +429,7 @@ async function synthesizeCosyVoice(text, cosyVoiceId, speed) {
       'Content-Type': 'application/json',
       'X-DashScope-DataInspection': 'disable',
     });
-    parts.push(extractCosyVoiceAudio(res));
+    parts.push(await extractCosyVoiceAudio(res));
   }
   return Buffer.concat(parts);
 }
@@ -514,8 +559,8 @@ module.exports.handler = async function (event, context, callback) {
     try {
       let audio;
       if (TTS_PROVIDER === 'cosyvoice') {
-        // 功能2：百炼 CosyVoice；映射缺失 cosyVoiceId 时回退默认音色。
-        const cosyVoiceId = COSYVOICE_VOICE_MAP[voice] || '';
+        // 功能2：百炼 CosyVoice；始终解析到非空音色 id（默认英文音色 loong*），保证请求体带 voice。
+        const cosyVoiceId = resolveCosyVoiceId(voice);
         try {
           audio = await synthesizeCosyVoice(text, cosyVoiceId, speed);
         } catch (cvErr) {
@@ -627,4 +672,5 @@ module.exports.handler = async function (event, context, callback) {
 module.exports.buildCosyVoicePayload = buildCosyVoicePayload;
 module.exports.extractCosyVoiceAudio = extractCosyVoiceAudio;
 module.exports.synthesizeCosyVoice = synthesizeCosyVoice;
-module.exports.__test = { TTS_PROVIDER, COSYVOICE_MODEL, COSYVOICE_VOICE_MAP, DASHSCOPE_TTS_URL };
+module.exports.resolveCosyVoiceId = resolveCosyVoiceId;
+module.exports.__test = { TTS_PROVIDER, COSYVOICE_MODEL, COSYVOICE_VOICE_MAP, COSYVOICE_DEFAULT_VOICE_MAP, DASHSCOPE_TTS_URL };

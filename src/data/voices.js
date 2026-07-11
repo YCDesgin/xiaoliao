@@ -12,15 +12,16 @@ export const KNOWN_EN_VOICES = ['cally', 'abby', 'andy', 'harry', 'eric'];
 
 /**
  * 每个发音人的中文标签与性别 hint（供 UI 下拉与默认分配使用）。
- * cosyVoiceId 为功能2（CosyVoice 逼真 TTS）占位：初值 ''，由用户在百炼试听后
- * 填入真实音色 id（与 aliyun-tts-proxy 的 COSYVOICE_VOICE_MAP 保持一致）。
+ * cosyVoiceId 为功能2（CosyVoice 逼真 TTS）默认英文音色：已预填 CosyVoice v3 纯英文
+ * 出海营销系列（性别/口音对齐），与 aliyun-tts-proxy 的 COSYVOICE_DEFAULT_VOICE_MAP 一致。
+ * 云端仍可用环境变量 COSYVOICE_VOICE_MAP 整体覆盖这些默认值（在后端生效）。
  */
 export const ALIYUN_VOICE_OPTIONS = [
-  { value: 'cally', label: 'Cally（女）', gender: 'female', cosyVoiceId: '' },
-  { value: 'abby', label: 'Abby（女）', gender: 'female', cosyVoiceId: '' },
-  { value: 'andy', label: 'Andy（男）', gender: 'male', cosyVoiceId: '' },
-  { value: 'harry', label: 'Harry（男）', gender: 'male', cosyVoiceId: '' },
-  { value: 'eric', label: 'Eric（男）', gender: 'male', cosyVoiceId: '' },
+  { value: 'cally', label: 'Cally（女）', gender: 'female', cosyVoiceId: 'loongcally_v3' },
+  { value: 'abby', label: 'Abby（女）', gender: 'female', cosyVoiceId: 'loongabby_v3' },
+  { value: 'andy', label: 'Andy（男）', gender: 'male', cosyVoiceId: 'loongandy_v3' },
+  { value: 'harry', label: 'Harry（男）', gender: 'male', cosyVoiceId: 'loongluca_v3' },
+  { value: 'eric', label: 'Eric（男）', gender: 'male', cosyVoiceId: 'loongeric_v3' },
 ];
 
 const FEMALE_VOICES = KNOWN_EN_VOICES.filter(
