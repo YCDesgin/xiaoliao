@@ -4,6 +4,24 @@
 const API_BASE = 'https://api.deepseek.com/v1/chat/completions';
 
 /**
+ * 容错规范化：保证每个 mistake 都有 wordDefs 数组（B01）。
+ * 解析失败 / 字段缺失都不抛错，缺省补 []，便于逐词释义优雅降级。
+ * @param {object} review
+ * @returns {object}
+ */
+function normalizeWordDefs(review) {
+  if (!review || typeof review !== 'object' || !Array.isArray(review.mistakes)) return review;
+  review.mistakes = review.mistakes.map((m) => {
+    if (!m || typeof m !== 'object') return m;
+    const defs = Array.isArray(m.wordDefs)
+      ? m.wordDefs.filter((d) => d && typeof d.word === 'string' && typeof d.zh === 'string')
+      : [];
+    return { ...m, wordDefs: defs };
+  });
+  return review;
+}
+
+/**
  * Send a message and get a response from DeepSeek.
  */
 export async function chatWithAI(apiKey, systemPrompt, messages) {
@@ -90,7 +108,10 @@ Return ONLY valid JSON (no markdown code blocks, no other text) in this exact sh
       "original": "the exact learner phrase/sentence to improve (verbatim from a You: line)",
       "corrected": "a more natural or more correct version",
       "reason": "one short friendly explanation in English (under 20 words)",
-      "reasonZh": "一段中文说明，用初学者能懂的大白话解释为什么这样说更好，30字以内"
+      "reasonZh": "一段中文说明，用初学者能懂的大白话解释为什么这样说更好，30字以内",
+      "wordDefs": [
+        { "word": "a key word taken from the 'corrected' sentence, lowercase, punctuation stripped", "zh": "该词的中文释义（大白话）" }
+      ]
     }
   ],
   "newWords": ["useful word or phrase from this conversation 1", "..."],
@@ -102,6 +123,7 @@ Rules:
 - "summaryZh": a plain-Chinese one-sentence summary for beginners (under 25 characters) — warm and encouraging, not literal translation of summary.
 - score is an integer 0-100 reflecting communication flow and effort; do NOT deduct for accent.
 - mistakes: pick 2-4 of the most valuable corrections; if the learner did great, give 1 gentle tip or an empty array.
+- wordDefs (per mistake): list the 1-3 most useful words that appear in the "corrected" sentence and give a plain-Chinese meaning, as wordDefs: [{ "word": <lowercase, no punctuation>, "zh": <中文释义> }]. If the corrected sentence has no noteworthy words, use an empty array [].
 - newWords: useful vocabulary or phrases that appeared in the conversation.
 - suggestions: 1-3 specific, actionable improvements for next time.
 - Tone: encouraging and supportive, never harsh.
@@ -130,7 +152,13 @@ ${conversationText}`;
     const raw = data.choices?.[0]?.message?.content || '';
 
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    if (jsonMatch) return JSON.parse(jsonMatch[0]);
+    if (jsonMatch) {
+      try {
+        return normalizeWordDefs(JSON.parse(jsonMatch[0]));
+      } catch {
+        return null;
+      }
+    }
     return null;
   } catch {
     return null;

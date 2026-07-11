@@ -1,11 +1,18 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import ContactList from './components/ContactList';
 import ChatView from './components/ChatView';
 import EndReview from './components/EndReview';
 import HistoryList from './components/HistoryList';
+import SyncModal from './components/SyncModal';
+import SyncStatus from './components/SyncStatus';
 import { getContact } from './data/contacts';
-import { getReviews } from './services/reviewStore';
-import { saveAudio, loadAudio, deleteAudio } from './services/audioStore';
+import { getReviews, setReviewSavedListener } from './services/reviewStore';
+import { loadMessages, saveMessages, clearMessages } from './services/messageStore';
+import * as syncService from './services/syncService';
+
+// 消息持久化已抽到 messageStore（供同步合并做原始读写）。
+// Re-export，保持既有调用方 / 测试仍从 App 导入。
+export { loadMessages, saveMessages, clearMessages };
 
 // Persist the "where the user was" so a refresh drops them back in.
 const LAST_VIEW_KEY = 'speakup_last_view';
@@ -29,64 +36,6 @@ export function rememberView(view, contactId) {
   } catch {
     // ignore storage failures (e.g. private mode)
   }
-}
-
-// Load messages from localStorage. Audio blobs live in IndexedDB (localStorage
-// can't hold binary), so after restoring the text we rehydrate each message's
-// audioBlob by its id. Returns a fully-populated array (audioBlob may be null).
-export async function loadMessages(contactId) {
-  try {
-    const raw = localStorage.getItem(`speakup_msgs_${contactId}`);
-    if (!raw) return [];
-    const msgs = JSON.parse(raw);
-    const restored = msgs.map(m => ({ ...m, timestamp: new Date(m.timestamp) }));
-    await Promise.all(restored.map(async (m) => {
-      try {
-        m.audioBlob = await loadAudio(m.id);
-      } catch {
-        m.audioBlob = null;
-      }
-    }));
-    return restored;
-  } catch {
-    return [];
-  }
-}
-
-export function saveMessages(contactId, msgs) {
-  const slim = msgs.map(m => ({
-    id: m.id,
-    role: m.role,
-    text: m.text,
-    type: m.type || undefined,
-    imageUrl: m.imageUrl || undefined,
-    query: m.query || undefined,
-    timestamp: m.timestamp instanceof Date ? m.timestamp.toISOString() : m.timestamp,
-    isError: m.isError || undefined,
-  }));
-  localStorage.setItem(`speakup_msgs_${contactId}`, JSON.stringify(slim));
-  // Persist audio blobs to IndexedDB (fire-and-forget, never blocks the text save).
-  for (const m of msgs) {
-    if (m.audioBlob && m.audioBlob instanceof Blob) {
-      saveAudio(m.id, m.audioBlob).catch(() => {});
-    }
-  }
-}
-
-export function clearMessages(contactId) {
-  // Best-effort: also purge any audio blobs we stored for these messages.
-  try {
-    const raw = localStorage.getItem(`speakup_msgs_${contactId}`);
-    if (raw) {
-      const msgs = JSON.parse(raw);
-      for (const m of msgs) {
-        if (m && m.id) deleteAudio(m.id).catch(() => {});
-      }
-    }
-  } catch {
-    // ignore parse errors
-  }
-  localStorage.removeItem(`speakup_msgs_${contactId}`);
 }
 
 export default function App() {
@@ -117,6 +66,11 @@ export default function App() {
   const [splash, setSplash] = useState(true);
   const [splashFade, setSplashFade] = useState(false);
 
+  // 同步码管理弹窗（T02）
+  const [showSyncModal, setShowSyncModal] = useState(false);
+  // 始终持有最新 messages，供手动同步后刷新视图（T01/T02）
+  const messagesRef = useRef([]);
+
   const [apiKey, setApiKey] = useState(() => {
     return localStorage.getItem('speakup_gemini_key') || '';
   });
@@ -142,6 +96,19 @@ export default function App() {
 
   const contact = currentContactId ? getContact(currentContactId) : null;
 
+  // Keep messagesRef in sync with the latest messages (for manual re-sync).
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  // Register the review-saved listener so a freshly generated review is pushed
+  // to the cloud when bound (A04 / T04).
+  useEffect(() => {
+    setReviewSavedListener((cid) => {
+      if (cid && syncService.isBound()) syncService.schedulePush(cid);
+    });
+  }, []);
+
   // On first mount, restore the conversation for the last-opened contact (if any)
   // so a refresh while in a chat drops the user straight back into it. The text
   // restore is async (audio blobs come from IndexedDB); the splash screen covers
@@ -159,10 +126,11 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Auto-save messages when they change
+  // Auto-save messages when they change; schedule a debounced cloud push if bound.
   useEffect(() => {
     if (currentContactId && messages.length > 0) {
       saveMessages(currentContactId, messages);
+      syncService.schedulePush(currentContactId);
     }
   }, [messages, currentContactId]);
 
@@ -176,15 +144,30 @@ export default function App() {
     };
   }, []);
 
-  const openChat = useCallback((contactId) => {
+  const openChat = useCallback(async (contactId) => {
     setCurrentContactId(contactId);
     setMessages([]);
-    loadMessages(contactId).then(setMessages).catch(() => setMessages([]));
     setReviewData(null);
     setReviewMeta(null);
     setChatFromHistory(false);
     setView('chat');
     rememberView('chat', contactId);
+    try {
+      const loaded = await loadMessages(contactId);
+      // 已绑定 → 进站先拉取云端并 LWW 合并（A03 / T01 ②）
+      if (syncService.isBound()) {
+        try {
+          const result = await syncService.pullContact(contactId, loaded);
+          setMessages(result.messages.length ? result.messages : loaded);
+          return;
+        } catch {
+          // 拉取失败（网络/令牌错误）不阻塞本地使用，降级为仅本地数据
+        }
+      }
+      setMessages(loaded);
+    } catch {
+      setMessages([]);
+    }
   }, []);
 
   const endChat = useCallback((review) => {
@@ -220,6 +203,16 @@ export default function App() {
     setShowHistory(false);
   }, []);
 
+  // 手动同步（SyncStatus 重试）后，用最新本地消息再拉一次并刷新视图（保留本地音频）。
+  const handleSynced = useCallback(async (cid) => {
+    try {
+      const r = await syncService.pullContact(cid, messagesRef.current);
+      setMessages(r.messages);
+    } catch {
+      /* 失败保持当前视图，状态条会显示 error */
+    }
+  }, []);
+
   return (
     <div className="h-full max-w-[430px] mx-auto bg-[#0e1621] flex flex-col overflow-hidden relative shadow-2xl">
       {view === 'contacts' && (
@@ -229,20 +222,24 @@ export default function App() {
           onSaveApiKey={saveApiKey}
           onSaveAvatar={saveUserAvatar}
           onOpenChat={openChat}
+          onOpenSync={() => setShowSyncModal(true)}
         />
       )}
       {view === 'chat' && contact && (
-        <ChatView
-          contact={contact}
-          messages={messages}
-          setMessages={setMessages}
-          apiKey={apiKey}
-          userAvatar={userAvatar}
-          onBack={backToContacts}
-          onEnd={endChat}
-          onShowHistory={() => openHistory(contact.id)}
-          fromHistory={chatFromHistory}
-        />
+        <>
+          <ChatView
+            contact={contact}
+            messages={messages}
+            setMessages={setMessages}
+            apiKey={apiKey}
+            userAvatar={userAvatar}
+            onBack={backToContacts}
+            onEnd={endChat}
+            onShowHistory={() => openHistory(contact.id)}
+            fromHistory={chatFromHistory}
+          />
+          <SyncStatus contactId={currentContactId} onSynced={handleSynced} />
+        </>
       )}
       {view === 'review' && contact && reviewData && (
         <EndReview
@@ -266,6 +263,10 @@ export default function App() {
           onSelect={viewHistoryReview}
           onClose={closeHistory}
         />
+      )}
+
+      {showSyncModal && (
+        <SyncModal onClose={() => setShowSyncModal(false)} onChange={() => {}} />
       )}
 
       {/* Splash screen overlay (pure visual brand enhancement, sits above all views) */}

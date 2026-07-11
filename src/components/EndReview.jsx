@@ -1,11 +1,46 @@
 import { useState, useEffect, useRef } from 'react';
 import { speakText, stopSpeaking } from '../services/speech';
+import WordDefBubble from './WordDefBubble';
+import { normalizeReview } from '../services/reviewStore';
+
+// 把 corrected 句子切成词 token（保留空格作为普通文本）。
+function tokenizeWords(text) {
+  if (!text) return [];
+  return text
+    .split(/(\s+)/)
+    .map((t) => ({ text: t, isWord: /[A-Za-z]/.test(t) && !/^\s+$/.test(t) }))
+    .filter((t) => t.text.length > 0);
+}
+
+function cleanWord(raw) {
+  return raw.toLowerCase().replace(/[^a-z'-]/g, '');
+}
+
+// 在 mistake.wordDefs 里按归一化词查找中文释义；找不到返回 null（→ 暂无释义）。
+function findDef(mistake, rawWord) {
+  const w = cleanWord(rawWord);
+  const defs = Array.isArray(mistake.wordDefs) ? mistake.wordDefs : [];
+  const hit = defs.find((d) => cleanWord(d.word) === w);
+  return hit ? hit.zh : null;
+}
 
 export default function EndReview({ contact, review, onBack, onContinue, meta = null, onBackToList }) {
   const [playingIdx, setPlayingIdx] = useState(null);
   const [showSummaryZh, setShowSummaryZh] = useState(false);
   const [zhOpen, setZhOpen] = useState({}); // Tracks which correction items have Chinese explanation expanded (keyed by index)
+  const [activeDef, setActiveDef] = useState(null); // 当前点开的逐词释义气泡 { word, zh, x, y }
   const activeRef = useRef(null); // Tracks the row whose playback is currently active
+
+  // 点击 corrected 中的某个词 → 打开释义气泡（B02）
+  const openDef = (e, mistake, rawWord) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    setActiveDef({
+      word: rawWord,
+      zh: findDef(mistake, rawWord),
+      x: rect.left + rect.width / 2,
+      y: rect.top,
+    });
+  };
 
   // Stop any ongoing playback when leaving the review page
   useEffect(() => () => stopSpeaking(), []);
@@ -40,10 +75,12 @@ export default function EndReview({ contact, review, onBack, onContinue, meta = 
     }
   };
 
-  const summary = review?.summary || 'Nice chatting with you today!';
-  const summaryZh = review?.summaryZh || '';
-  const score = typeof review?.score === 'number' ? review.score : 0;
-  const mistakes = Array.isArray(review?.mistakes) ? review.mistakes : [];
+  // Normalize so legacy reviews without wordDefs still render/tap correctly.
+  const normalizedReview = normalizeReview(review);
+  const summary = normalizedReview.summary || 'Nice chatting with you today!';
+  const summaryZh = normalizedReview.summaryZh || '';
+  const score = typeof normalizedReview.score === 'number' ? normalizedReview.score : 0;
+  const mistakes = Array.isArray(normalizedReview.mistakes) ? normalizedReview.mistakes : [];
   const newWords = Array.isArray(review?.newWords) ? review.newWords : [];
   const suggestions = Array.isArray(review?.suggestions) ? review.suggestions : [];
   const expressions = Array.isArray(review?.expressions) ? review.expressions : [];
@@ -117,7 +154,23 @@ export default function EndReview({ contact, review, onBack, onContinue, meta = 
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-[15px] text-[#9ca3af] line-through decoration-[#9ca3af]/80">{m.original}</span>
                     <span className="text-[#2aabee]">→</span>
-                    <span className="text-sm font-bold text-[#f5f5f5]">{m.corrected}</span>
+                    <span className="text-sm font-bold text-[#f5f5f5]">
+                      {tokenizeWords(m.corrected).map((token, ti) =>
+                        token.isWord ? (
+                          <button
+                            key={ti}
+                            type="button"
+                            title="点击查看释义 / 朗读"
+                            onClick={(e) => openDef(e, m, token.text)}
+                            className="inline hover:text-[#3db9f5] hover:underline underline-offset-2 transition-colors cursor-pointer"
+                          >
+                            {token.text}
+                          </button>
+                        ) : (
+                          <span key={ti}>{token.text}</span>
+                        )
+                      )}
+                    </span>
                     {m.corrected && (
                       <button
                         type="button"
@@ -220,6 +273,16 @@ export default function EndReview({ contact, review, onBack, onContinue, meta = 
           </button>
         )}
       </div>
+
+      {activeDef && (
+        <WordDefBubble
+          word={activeDef.word}
+          zh={activeDef.zh}
+          x={activeDef.x}
+          y={activeDef.y}
+          onClose={() => setActiveDef(null)}
+        />
+      )}
     </div>
   );
 }

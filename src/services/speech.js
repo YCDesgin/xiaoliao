@@ -972,6 +972,58 @@ export function isSpeaking() {
   return speaking;
 }
 
+/**
+ * Speak a single word using the browser's built-in SpeechSynthesis engine.
+ * Used by the per-word "tap to define" bubble so learners can hear the exact
+ * pronunciation of the word they tapped (B05). Reuses the same robust voice
+ * selection as browserSpeak() but keeps the rate slow for clarity.
+ *
+ * @param {string} word - The word to speak
+ * @param {object} opts - Optional { rate, lang, voice }
+ */
+export function speakWord(word, opts = {}) {
+  if (!word || !window.speechSynthesis) return;
+  const text = String(word).trim();
+  if (!text) return;
+
+  const lang = opts.lang || 'en-US';
+  const rate = opts.rate || 0.8; // slower than normal so the single word is clear
+  const preferred = opts.voice || localStorage.getItem('speakup_preferred_voice') || '';
+
+  // Cancel anything currently playing (including a sentence being read) so the
+  // single-word playback is unambiguous.
+  window.speechSynthesis.cancel();
+
+  const speak = (voices) => {
+    const selected = pickBestVoice(voices, preferred);
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = lang;
+    u.rate = rate;
+    u.pitch = opts.pitch || 1.0;
+    if (selected) u.voice = selected;
+    speaking = true;
+    u.onend = () => { speaking = false; };
+    u.onerror = () => { speaking = false; };
+    window.speechSynthesis.speak(u);
+  };
+
+  const voices = window.speechSynthesis.getVoices();
+  if (voices && voices.length > 0) {
+    speak(voices);
+  } else {
+    const onVoicesChanged = () => {
+      window.speechSynthesis.removeEventListener('voiceschanged', onVoicesChanged);
+      speak(window.speechSynthesis.getVoices());
+    };
+    window.speechSynthesis.addEventListener('voiceschanged', onVoicesChanged);
+    setTimeout(() => {
+      const v = window.speechSynthesis.getVoices();
+      window.speechSynthesis.removeEventListener('voiceschanged', onVoicesChanged);
+      speak(v && v.length > 0 ? v : []);
+    }, 400);
+  }
+}
+
 export function supportsSpeechRecognition() {
   return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
 }

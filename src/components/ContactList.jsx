@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { contacts } from '../data/contacts';
 import SettingsModal from './SettingsModal';
 
-export default function ContactList({ apiKey, userAvatar, onSaveApiKey, onSaveAvatar, onOpenChat }) {
+export default function ContactList({ apiKey, userAvatar, onSaveApiKey, onSaveAvatar, onOpenChat, onOpenSync }) {
   const [showSettings, setShowSettings] = useState(false);
 
   return (
@@ -73,6 +73,7 @@ export default function ContactList({ apiKey, userAvatar, onSaveApiKey, onSaveAv
           onSave={onSaveApiKey}
           onSaveAvatar={onSaveAvatar}
           onClose={() => setShowSettings(false)}
+          onOpenSync={onOpenSync}
         />
       )}
     </>

@@ -5,7 +5,7 @@ import { chatWithAI, reviewConversation } from '../services/gemini';
 import { speakText, stopSpeaking, SPEED_PRESETS } from '../services/speech';
 import { DIFFICULTY_PRESETS, getContactDifficulty, setContactDifficulty } from '../data/contacts';
 import { getEffectiveVoice, ALIYUN_VOICE_OPTIONS, setContactVoiceOverride } from '../data/voices';
-import { fingerprintOf, findCached, saveReview, clearReviews } from '../services/reviewStore';
+import { fingerprintOf, findCached, saveReview, clearReviews, normalizeReview } from '../services/reviewStore';
 import { searchImage, cleanQuery } from '../services/imageService';
 
 function getContactSpeed(cId) { return parseFloat(localStorage.getItem(`speakup_speed_${cId}`) || '0.75'); }
@@ -170,7 +170,8 @@ export default function ChatView({ contact, messages, setMessages, apiKey, userA
       summary: review.summary || 'Nice chatting with you today!',
       summaryZh: review.summaryZh || '',
       score: typeof review.score === 'number' ? review.score : 0,
-      mistakes: Array.isArray(review.mistakes) ? review.mistakes : [],
+      // 透传 wordDefs（B01）：normalizeReview 保证每个 mistake 都有 wordDefs 数组
+      mistakes: normalizeReview(review).mistakes,
       newWords: Array.isArray(review.newWords) ? review.newWords : [],
       suggestions: Array.isArray(review.suggestions) ? review.suggestions : [],
       expressions: Array.isArray(review.expressions) ? review.expressions : ['having a nice chat'],

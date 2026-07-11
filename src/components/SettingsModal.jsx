@@ -1,6 +1,8 @@
 import { useState, useRef } from 'react';
 import { contacts } from '../data/contacts';
 import { ALIYUN_VOICE_OPTIONS, getContactVoiceOverride, setContactVoiceOverride, getEffectiveVoice } from '../data/voices';
+import { isBound } from '../services/syncService';
+import { setSyncProxyUrl } from '../services/syncConfig';
 
 // Edge-TTS voice options for the "AI 语音" dropdown.
 const VOICE_OPTIONS = [
@@ -10,7 +12,7 @@ const VOICE_OPTIONS = [
   { value: 'en-AU-NatashaNeural', label: 'Natasha (澳式女声)' },
 ];
 
-export default function SettingsModal({ apiKey, userAvatar, onSave, onSaveAvatar, onClose }) {
+export default function SettingsModal({ apiKey, userAvatar, onSave, onSaveAvatar, onClose, onOpenSync }) {
   // Fallback to an empty string so the input never becomes an uncontrolled
   // (null/undefined) field and `key.trim()` below can never throw.
   const [key, setKey] = useState(apiKey || '');
@@ -19,6 +21,10 @@ export default function SettingsModal({ apiKey, userAvatar, onSave, onSaveAvatar
   // same localStorage key as getCloudTtsUrl() in services/speech.js.
   const [cloudUrl, setCloudUrl] = useState(
     () => localStorage.getItem('speakup_cloud_tts_url') || '',
+  );
+  // 同步代理地址（覆盖 syncConfig 默认占位）
+  const [syncProxy, setSyncProxy] = useState(
+    () => localStorage.getItem('speakup_sync_proxy_url') || '',
   );
   // Preferred AI voice; default to Jenny so the dropdown always has a value.
   const [preferredVoice, setPreferredVoice] = useState(
@@ -36,6 +42,8 @@ export default function SettingsModal({ apiKey, userAvatar, onSave, onSaveAvatar
     const trimmedUrl = (cloudUrl || '').trim();
     if (trimmedUrl) localStorage.setItem('speakup_cloud_tts_url', trimmedUrl);
     else localStorage.removeItem('speakup_cloud_tts_url');
+    // 同步代理地址（清空则移除覆盖，回到默认占位）
+    setSyncProxyUrl((syncProxy || '').trim());
     // Persist preferred AI voice.
     localStorage.setItem('speakup_preferred_voice', preferredVoice || 'en-US-JennyNeural');
     setSaved(true);
@@ -121,6 +129,34 @@ export default function SettingsModal({ apiKey, userAvatar, onSave, onSaveAvatar
           <input type="url" value={cloudUrl} onChange={e => setCloudUrl(e.target.value)} placeholder="https://xiaoliao-tts.xxx.workers.dev"
             className="w-full bg-[#0e1621] border border-[#1c2a3a] rounded-xl px-3 py-2.5 text-sm text-[#f5f5f5] placeholder-[#5a6a7a] focus:outline-none focus:border-[#2aabee] transition-colors" />
           <p className="text-[11px] text-[#5a6a7a] mt-1.5">部署 Cloudflare Worker 后填入，手机可听 AI 语音</p>
+        </div>
+
+        {/* 数据同步（同步码跨端同步） */}
+        <div className="mt-5">
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="block text-xs text-[#707579]">数据同步</label>
+            <span className={`text-[10px] px-2 py-0.5 rounded-full ${isBound() ? 'text-[#4caf50] bg-[#4caf50]/10' : 'text-[#e67e22] bg-[#e67e22]/10'}`}>
+              {isBound() ? '已绑定' : '未绑定'}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => onOpenSync && onOpenSync()}
+            className="w-full py-2.5 bg-[#0e1621] hover:bg-[#1f2c3a] text-[#f5f5f5] rounded-xl text-sm border border-[#1c2a3a] transition-colors"
+          >
+            管理同步码
+          </button>
+          <div className="mt-3">
+            <label className="block text-xs text-[#707579] mb-1.5">同步代理地址</label>
+            <input
+              type="url"
+              value={syncProxy}
+              onChange={(e) => setSyncProxy(e.target.value)}
+              placeholder="https://<your-sync-proxy>.cn-hangzhou.fcapp.run"
+              className="w-full bg-[#0e1621] border border-[#1c2a3a] rounded-xl px-3 py-2.5 text-sm text-[#f5f5f5] placeholder-[#5a6a7a] focus:outline-none focus:border-[#2aabee] transition-colors"
+            />
+            <p className="text-[11px] text-[#5a6a7a] mt-1.5">部署 aliyun-sync-proxy 后填入 HTTP 触发器地址</p>
+          </div>
         </div>
 
         {/* AI voice selection */}

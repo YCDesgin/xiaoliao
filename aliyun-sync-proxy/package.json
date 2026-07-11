@@ -1,0 +1,12 @@
+{
+  "name": "aliyun-sync-proxy",
+  "version": "1.0.0",
+  "description": "虾聊同步码跨端同步代理：阿里云 FC + OSS 的同步服务端（双因子鉴权）",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "ali-oss": "^6.21.0"
+  }
+}

@@ -1,0 +1,46 @@
+# Serverless Devs 部署配置 —— 虾聊同步代理 (aliyun-sync-proxy)
+# 用法：在 aliyun-sync-proxy/ 目录执行 `s deploy`（需先 `s config add` 配置阿里云账号）。
+#
+# ⚠️ 占位项请替换为你的真实值：
+#   - <YOUR_ACCOUNT_ID>  阿里云主账号 ID（在「访问控制 → 概览」查看）
+#   - <YOUR_FC_ROLE>     已授权 OSS 读写权限的 RAM 角色名
+#   - <YOUR_BUCKET_NAME> 你创建的 OSS Bucket 名
+#   - <YOUR_ACCESS_KEY_ID/SECRET>  RAM 用户 AK（或直接用角色，可留空由角色承担）
+
+edition: 1.0.0
+name: xiaoliao-sync
+access: default
+
+services:
+  sync-proxy:
+    component: fc
+    props:
+      region: cn-hangzhou
+      service:
+        name: xiaoliao-sync-service
+        # RAM 角色需具备该 Bucket 的 oss:GetObject / PutObject / ListObjects / DeleteObject
+        role: acs:ram::<YOUR_ACCOUNT_ID>:role/<YOUR_FC_ROLE>
+      function:
+        name: aliyun-sync-proxy
+        runtime: nodejs20
+        handler: index.handler
+        memorySize: 128
+        timeout: 10
+        instanceConcurrency: 1
+        codeUri: ./
+        environmentVariables:
+          OSS_REGION: cn-hangzhou
+          OSS_BUCKET: <YOUR_BUCKET_NAME>
+          # 若用 RAM 角色承担 OSS 权限，下面两项可留空（函数通过角色 STS 拿到临时凭证）；
+          # 若直接用 AK，请填入对应值（建议放「函数配置 → 环境变量」，不要提交到仓库）。
+          OSS_ACCESS_KEY_ID: <YOUR_ACCESS_KEY_ID>
+          OSS_ACCESS_KEY_SECRET: <YOUR_ACCESS_KEY_SECRET>
+      triggers:
+        - name: httpTrigger
+          type: http
+          config:
+            authType: anonymous
+            methods:
+              - GET
+              - POST
+              - OPTIONS
