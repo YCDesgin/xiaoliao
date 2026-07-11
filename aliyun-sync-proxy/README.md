@@ -54,7 +54,13 @@ s deploy               # 部署（按 s.yaml）
 `https://<random>.cn-hangzhou.fcapp.run`。
 
 也可以不走 `s`，直接在 FC 控制台「创建函数 → 上传代码包（本目录 zip）」，
-运行时选 **Node.js 20**，请求处理程序填 `index.handler`，并配置上面的环境变量。
+运行时选 **Node.js 20**，请求处理程序填 `index.handler`，并配置下面的环境变量：
+
+- `OSS_REGION` = `oss-cn-hangzhou`（⚠️ 必须是带 `oss-` 前缀的规范写法，如 `oss-cn-hangzhou`；
+  若误填 `cn-hangzhou`，新版 `index.js` 会自动补全前缀，但建议直接填规范值避免歧义）
+- `OSS_BUCKET` = 你的 Bucket 名（如 `xiaoliao-sync`）
+- `OSS_ACCESS_KEY_ID` = RAM 用户的 AccessKeyId
+- `OSS_ACCESS_KEY_SECRET` = RAM 用户的 AccessKeySecret
 
 ### ④ 填代理地址到 App
 把第 ③ 步拿到的触发器 URL 填入 App：

@@ -15,7 +15,10 @@
 const OSS = require('ali-oss');
 const crypto = require('crypto');
 
-const OSS_REGION = process.env.OSS_REGION || 'cn-hangzhou';
+// ali-oss 期望 region 形如 oss-cn-hangzhou（带 oss- 前缀）；
+// 用户常误填 cn-hangzhou，这里做兼容：缺失前缀时自动补上，避免 ENOTFOUND。
+const RAW_REGION = process.env.OSS_REGION || 'cn-hangzhou';
+const OSS_REGION = RAW_REGION.startsWith('oss-') ? RAW_REGION : `oss-${RAW_REGION}`;
 const OSS_BUCKET = process.env.OSS_BUCKET || '';
 const OSS_ACCESS_KEY_ID = process.env.OSS_ACCESS_KEY_ID || '';
 const OSS_ACCESS_KEY_SECRET = process.env.OSS_ACCESS_KEY_SECRET || '';
