@@ -5,21 +5,55 @@ import EndReview from './components/EndReview';
 import HistoryList from './components/HistoryList';
 import { getContact } from './data/contacts';
 import { getReviews } from './services/reviewStore';
+import { saveAudio, loadAudio, deleteAudio } from './services/audioStore';
 
-// Persist messages to localStorage (text only, audio blobs can't be serialized)
-function loadMessages(contactId) {
+// Persist the "where the user was" so a refresh drops them back in.
+const LAST_VIEW_KEY = 'speakup_last_view';
+const LAST_CONTACT_KEY = 'speakup_last_contact';
+
+/**
+ * Persist which view / contact the user last stayed on.
+ * Audio blobs themselves are stored separately (IndexedDB), this only records
+ * the navigation state in localStorage so it can be restored on reload.
+ * @param {'contacts'|'chat'|'review'} view
+ * @param {string|null} contactId
+ */
+export function rememberView(view, contactId) {
+  try {
+    localStorage.setItem(LAST_VIEW_KEY, view);
+    if (contactId) {
+      localStorage.setItem(LAST_CONTACT_KEY, contactId);
+    } else {
+      localStorage.removeItem(LAST_CONTACT_KEY);
+    }
+  } catch {
+    // ignore storage failures (e.g. private mode)
+  }
+}
+
+// Load messages from localStorage. Audio blobs live in IndexedDB (localStorage
+// can't hold binary), so after restoring the text we rehydrate each message's
+// audioBlob by its id. Returns a fully-populated array (audioBlob may be null).
+export async function loadMessages(contactId) {
   try {
     const raw = localStorage.getItem(`speakup_msgs_${contactId}`);
     if (!raw) return [];
     const msgs = JSON.parse(raw);
-    // Restore Date objects
-    return msgs.map(m => ({ ...m, timestamp: new Date(m.timestamp) }));
+    const restored = msgs.map(m => ({ ...m, timestamp: new Date(m.timestamp) }));
+    await Promise.all(restored.map(async (m) => {
+      try {
+        m.audioBlob = await loadAudio(m.id);
+      } catch {
+        m.audioBlob = null;
+      }
+    }));
+    return restored;
   } catch {
     return [];
   }
 }
 
-function saveMessages(contactId, msgs) {
+export function saveMessages(contactId, msgs) {
   const slim = msgs.map(m => ({
     id: m.id,
     role: m.role,
@@ -31,15 +65,46 @@ function saveMessages(contactId, msgs) {
     isError: m.isError || undefined,
   }));
   localStorage.setItem(`speakup_msgs_${contactId}`, JSON.stringify(slim));
+  // Persist audio blobs to IndexedDB (fire-and-forget, never blocks the text save).
+  for (const m of msgs) {
+    if (m.audioBlob && m.audioBlob instanceof Blob) {
+      saveAudio(m.id, m.audioBlob).catch(() => {});
+    }
+  }
 }
 
-function clearMessages(contactId) {
+export function clearMessages(contactId) {
+  // Best-effort: also purge any audio blobs we stored for these messages.
+  try {
+    const raw = localStorage.getItem(`speakup_msgs_${contactId}`);
+    if (raw) {
+      const msgs = JSON.parse(raw);
+      for (const m of msgs) {
+        if (m && m.id) deleteAudio(m.id).catch(() => {});
+      }
+    }
+  } catch {
+    // ignore parse errors
+  }
   localStorage.removeItem(`speakup_msgs_${contactId}`);
 }
 
 export default function App() {
-  const [view, setView] = useState('contacts');
-  const [currentContactId, setCurrentContactId] = useState(null);
+  // Restore the last view & contact so a refresh returns to where the user was.
+  const [view, setView] = useState(() => {
+    try {
+      return localStorage.getItem(LAST_VIEW_KEY) || 'contacts';
+    } catch {
+      return 'contacts';
+    }
+  });
+  const [currentContactId, setCurrentContactId] = useState(() => {
+    try {
+      return localStorage.getItem(LAST_CONTACT_KEY) || null;
+    } catch {
+      return null;
+    }
+  });
   const [messages, setMessages] = useState([]);
   const [reviewData, setReviewData] = useState(null);
   const [showHistory, setShowHistory] = useState(false);
@@ -77,6 +142,23 @@ export default function App() {
 
   const contact = currentContactId ? getContact(currentContactId) : null;
 
+  // On first mount, restore the conversation for the last-opened contact (if any)
+  // so a refresh while in a chat drops the user straight back into it. The text
+  // restore is async (audio blobs come from IndexedDB); the splash screen covers
+  // this work. We do NOT touch the auto-save effect below because at mount
+  // `messages` is empty, so it won't overwrite anything.
+  useEffect(() => {
+    if (currentContactId) {
+      loadMessages(currentContactId).then(setMessages).catch(() => setMessages([]));
+    }
+    // Defensive: a restored 'review' view needs ephemeral reviewData we cannot
+    // reconstruct after a reload, so fall back to a view that can actually render.
+    if (localStorage.getItem(LAST_VIEW_KEY) === 'review' && !reviewData) {
+      setView('contacts');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Auto-save messages when they change
   useEffect(() => {
     if (currentContactId && messages.length > 0) {
@@ -96,23 +178,27 @@ export default function App() {
 
   const openChat = useCallback((contactId) => {
     setCurrentContactId(contactId);
-    const existing = loadMessages(contactId);
-    setMessages(existing);
+    setMessages([]);
+    loadMessages(contactId).then(setMessages).catch(() => setMessages([]));
     setReviewData(null);
     setReviewMeta(null);
     setChatFromHistory(false);
     setView('chat');
+    rememberView('chat', contactId);
   }, []);
 
   const endChat = useCallback((review) => {
     setReviewData(review);
     setReviewMeta(null);
     setView('review');
+    // Keep the current contact so re-entering chat restores its history.
+    rememberView('review', localStorage.getItem(LAST_CONTACT_KEY));
   }, []);
 
   const backToContacts = useCallback(() => {
     setView('contacts');
     setCurrentContactId(null);
+    rememberView('contacts', null);
   }, []);
 
   const openHistory = useCallback((contactId) => {
@@ -125,6 +211,7 @@ export default function App() {
     setReviewMeta(entry);
     setShowHistory(false);
     setView('review');
+    rememberView('review', localStorage.getItem(LAST_CONTACT_KEY));
   }, []);
   const backToHistoryList = useCallback(() => {
     setShowHistory(true);
