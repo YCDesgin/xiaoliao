@@ -60,6 +60,26 @@ function reportAsrStatus(status) {
 
 let ttsMode = 'browser'; // 'browser' | 'edgetts'
 
+// --- Word 🔊 provider (功能2 联动) ---
+// 控制「点词朗读单个单词」走浏览器原生 speechSynthesis 还是云端 CosyVoice：
+//   'browser'  （默认）  → 浏览器 SpeechSynthesis（免费，但机械）
+//   'cosyvoice'           → 经 cloudTtsSpeak 走 FC 代理的 CosyVoice（更逼真）
+// 句子播放始终由 getCloudTtsUrl() 是否存在决定（与现有一致），与此开关无关。
+let wordTtsProvider =
+  (typeof localStorage !== 'undefined' && localStorage.getItem('speakup_word_tts_provider')) || 'browser';
+
+export function setWordTtsProvider(p) {
+  wordTtsProvider = p;
+  if (typeof localStorage !== 'undefined') {
+    if (p && p !== 'browser') localStorage.setItem('speakup_word_tts_provider', p);
+    else localStorage.removeItem('speakup_word_tts_provider');
+  }
+}
+
+export function getWordTtsProvider() {
+  return wordTtsProvider;
+}
+
 // --- Web Audio API playback (mobile-safe) ---
 // Mobile browsers enforce a stricter autoplay policy than desktop: audio.play()
 // must run inside the user-gesture call stack, or the page must have unlocked an
@@ -973,16 +993,47 @@ export function isSpeaking() {
 }
 
 /**
- * Speak a single word using the browser's built-in SpeechSynthesis engine.
- * Used by the per-word "tap to define" bubble so learners can hear the exact
- * pronunciation of the word they tapped (B05). Reuses the same robust voice
- * selection as browserSpeak() but keeps the rate slow for clarity.
+ * Speak a single word. Used by the per-word "tap to define" bubble so learners
+ * can hear the exact pronunciation of the word they tapped (功能1 🔊).
+ *
+ * 播放入口可配置（功能2 联动，架构 §3 / §7）：
+ *   - provider === 'cosyvoice' 且已配置云端 TTS 地址 → 走 cloudTtsSpeak（CosyVoice，更逼真）；
+ *     失败自动回退浏览器 speechSynthesis。
+ *   - 其余（默认 'browser'）→ 浏览器原生 SpeechSynthesis。
  *
  * @param {string} word - The word to speak
  * @param {object} opts - Optional { rate, lang, voice }
  */
 export function speakWord(word, opts = {}) {
-  if (!word || !window.speechSynthesis) return;
+  if (!word) return;
+  const text = String(word).trim();
+  if (!text) return;
+
+  const provider = getWordTtsProvider();
+  if (provider === 'cosyvoice' && getCloudTtsUrl() && typeof window !== 'undefined' && window.speechSynthesis) {
+    // 经云端 CosyVoice 朗读单词；任何失败都回退浏览器原生 TTS（绝不让点击无反应）。
+    cloudTtsSpeak(text, 'en-US-JennyNeural', opts.rate || 0.8).catch(() => {
+      speakBrowserWord(text, opts);
+    });
+    return;
+  }
+
+  speakBrowserWord(text, opts);
+}
+
+/**
+ * Speak a single word using the browser's built-in SpeechSynthesis engine.
+ * Reuses the same robust voice selection as browserSpeak() but keeps the rate
+ * slow for clarity. (speakWord 的默认/browser 路径与此一致。)
+ *
+ * @param {string} word - The word to speak
+ * @param {object} opts - Optional { rate, lang, voice }
+ */
+function speakBrowserWord(word, opts = {}) {
+  if (!window.speechSynthesis) {
+    console.warn('Speech synthesis not supported');
+    return;
+  }
   const text = String(word).trim();
   if (!text) return;
 

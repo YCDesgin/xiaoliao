@@ -11,6 +11,7 @@ import { loadAudio, saveAudio, deleteAudio } from './audioStore';
 const msgKey = (id) => `speakup_msgs_${id}`;
 
 // 把一条消息转成「可序列化 slim」形态（剥离 audioBlob 二进制；时间戳统一 ISO）。
+// metadata 承载功能1 的 wordDefs 缓存，随消息文本一起持久化（不新增独立 key）。
 function toSlim(m) {
   return {
     id: m.id,
@@ -21,6 +22,7 @@ function toSlim(m) {
     query: m.query || undefined,
     timestamp: m.timestamp instanceof Date ? m.timestamp.toISOString() : m.timestamp,
     isError: m.isError || undefined,
+    metadata: m.metadata || undefined,
   };
 }
 

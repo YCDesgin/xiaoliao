@@ -11,7 +11,7 @@ import { speakWord } from '../services/speech';
  * 坐标说明：x/y 来自触发元素 getBoundingClientRect()（视口坐标系），
  * 本组件用 fixed 定位，二者一致。
  */
-export default function WordDefBubble({ word, zh, x, y, onClose }) {
+export default function WordDefBubble({ word, zh, phonetic, x, y, onClose }) {
   const ref = useRef(null);
   const [speaking, setSpeaking] = useState(false);
 
@@ -64,6 +64,10 @@ export default function WordDefBubble({ word, zh, x, y, onClose }) {
           🔊
         </button>
       </div>
+      {/* 音标：仅当 AI 预生成/查词返回 phonetic 时才显示（缺失优雅降级，不显示占位） */}
+      {phonetic ? (
+        <div className="mt-0.5 text-[12px] text-[#7fb3d5] leading-snug">{phonetic}</div>
+      ) : null}
       <div className="mt-1 text-[13px] text-[#cdd6df] leading-relaxed">
         {zh || '暂无释义'}
       </div>

@@ -17,7 +17,8 @@ const { URLSearchParams } = require('url');
 const { spawn } = require('child_process');
 // ffmpeg-static 自带预编译二进制：FC Node.js 运行时安装依赖后可直接 require 拿到二进制路径，
 // 无需系统 apt / 额外安装。用于把前端上传的 opus/webm 音频转码成 NLS 要求的 16k/16bit/mono WAV。
-const ffmpeg = require('ffmpeg-static');
+// 注意：改为「惰性 require」，只在真正用到 ASR 转码时才加载，避免 ffmpeg-static 缺失时
+// 连 TTS/CosyVoice 冷启动都失败（也便于无依赖环境下单元测试 CosyVoice 相关函数）。
 
 const REGION = process.env.ALIYUN_REGION || 'cn-shanghai';
 const APPKEY = process.env.ALIYUN_APPKEY || '';
@@ -28,6 +29,29 @@ const DEFAULT_VOICE = process.env.DEFAULT_VOICE || 'cally';
 
 // 阿里云 NLS 可用英文发音人（仅这些名称会直接采用，其余回退 DEFAULT_VOICE）
 const KNOWN_EN_VOICES = ['cally', 'abby', 'andy', 'harry', 'eric'];
+
+// --- CosyVoice（百炼）配置（功能2：更逼真的 TTS）---
+// 默认仍走 NLS（兜底/生产）；设置 TTS_PROVIDER=cosyvoice 后切换到百炼 CosyVoice。
+// 前端只传阿里云发音人名（cally/abby/...），真正的 CosyVoice 音色 id 在此映射。
+const TTS_PROVIDER = (process.env.TTS_PROVIDER || 'nls').toLowerCase();
+const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY || '';
+const COSYVOICE_MODEL = process.env.COSYVOICE_MODEL || 'cosyvoice-v3-flash';
+// 与前端 src/data/voices.js 的 cosyVoiceId 保持一致；初值占位 ''，由用户在百炼试听后填真实 id。
+// 也可通过环境变量 COSYVOICE_VOICE_MAP（JSON 字符串）整体覆盖，例如：
+//   {"cally":"<id>","abby":"<id>","andy":"<id>","harry":"<id>","eric":"<id>"}
+let COSYVOICE_VOICE_MAP = { cally: '', abby: '', andy: '', harry: '', eric: '' };
+try {
+  if (process.env.COSYVOICE_VOICE_MAP) {
+    const parsed = JSON.parse(process.env.COSYVOICE_VOICE_MAP);
+    if (parsed && typeof parsed === 'object') {
+      COSYVOICE_VOICE_MAP = { ...COSYVOICE_VOICE_MAP, ...parsed };
+    }
+  }
+} catch (e) {
+  // 环境变量非合法 JSON：沿用代码内占位，不阻断启动。
+  console.error('[CosyVoice] COSYVOICE_VOICE_MAP 解析失败，沿用代码内占位:', e && e.message);
+}
+const DASHSCOPE_TTS_URL = 'https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer';
 
 const META_HOST = `nls-meta.${REGION}.aliyuncs.com`;
 const GATEWAY_HOST = `nls-gateway.${REGION}.aliyuncs.com`;
@@ -170,7 +194,11 @@ function detectFfmpegFormat(buf) {
 
 function transcodeToWav(inputBuffer, forcedFmt = '') {
   return new Promise((resolve, reject) => {
-    if (!ffmpeg) {
+    let ffmpeg;
+    try {
+      // 惰性加载：仅 ASR 转码路径需要，缺失时不阻断 TTS / CosyVoice 冷启动。
+      ffmpeg = require('ffmpeg-static');
+    } catch {
       reject(new Error('ffmpeg 不可用：请在函数目录执行 npm install ffmpeg-static 后重新部署'));
       return;
     }
@@ -262,6 +290,103 @@ function corsHeaders() {
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, X-Requested-With',
   };
+}
+
+// --- CosyVoice（百炼）语音合成（功能2）---
+// 直调 DashScope HTTP API（Node 内置 https，零额外依赖）。支持非流式（output.audio）
+// 与流式（SSE，逐行 data: {...output.audio...}）两种返回，统一解析为 mp3 Buffer。
+
+/**
+ * 构造 CosyVoice 请求体。cosyVoiceId 缺省（占位未填）时省略 voice 字段，
+ * 交由模型使用默认音色（设计 §3 / §7：映射缺失回退默认，不报错）。
+ * 导出仅供单测（架构 T9）。
+ */
+function buildCosyVoicePayload(text, cosyVoiceId, speed, model) {
+  const payload = {
+    model: model || COSYVOICE_MODEL,
+    input: { text },
+    parameters: {
+      format: 'mp3',
+      sample_rate: 16000,
+      // CosyVoice 语速为 0.5~2.0 倍率；speed 已是倍率（app 传 "±N%" 换算得来）
+      rate: Math.max(0.5, Math.min(2.0, Number(speed) || 1)),
+      volume: 50,
+    },
+  };
+  if (cosyVoiceId) payload.input.voice = cosyVoiceId;
+  return payload;
+}
+
+/**
+ * 从 DashScope 响应中解析 mp3 音频 Buffer。
+ * 兼容非流式 JSON（output.audio 字段）与流式 SSE（逐行 data: {...}）。
+ * 导出仅供单测（架构 T9）。
+ */
+function extractCosyVoiceAudio(res) {
+  const ct = res.contentType || '';
+  // 流式（SSE）：逐行拼接 output.audio
+  if (ct.includes('text/event-stream')) {
+    const lines = res.body.toString('utf8').split('\n');
+    const chunks = [];
+    for (const line of lines) {
+      const s = line.trim();
+      if (!s.startsWith('data:')) continue;
+      const json = s.slice(5).trim();
+      if (!json || json === '[DONE]') continue;
+      try {
+        const obj = JSON.parse(json);
+        const a = obj.output && obj.output.audio;
+        if (a) chunks.push(Buffer.from(a, 'base64'));
+      } catch { /* 跳过非 JSON 行 */ }
+    }
+    if (chunks.length === 0) throw new Error('CosyVoice 流式响应未解析到音频');
+    return Buffer.concat(chunks);
+  }
+  // 非流式 JSON
+  let data;
+  try {
+    data = JSON.parse(res.body.toString('utf8'));
+  } catch (e) {
+    throw new Error('CosyVoice 响应解析失败');
+  }
+  const code = data.code || (data.output && data.output.code);
+  if (code !== undefined && code !== null && String(code) !== '200' && String(code) !== '20000000') {
+    throw new Error('CosyVoice 合成失败: ' + (data.message || JSON.stringify(data).slice(0, 200)));
+  }
+  const audio = data.output && data.output.audio;
+  if (!audio) throw new Error('CosyVoice 响应缺少 audio 字段');
+  return Buffer.from(audio, 'base64');
+}
+
+// 发送 JSON 的便捷封装（复用 httpsPostBuffer）。
+function httpsPostJson(urlStr, payloadObj, extraHeaders = {}, timeoutMs = 30000) {
+  const bodyBuffer = Buffer.from(JSON.stringify(payloadObj));
+  return httpsPostBuffer(urlStr, bodyBuffer, 'application/json', timeoutMs, extraHeaders);
+}
+
+/**
+ * 合成整段文本为 mp3 Buffer（CosyVoice）。长文本按词切分逐段合成再拼接。
+ * @param {string} text
+ * @param {string} cosyVoiceId 音色 id（'' 表示用默认音色）
+ * @param {number} speed 语速倍率 0.5~2.0
+ * @returns {Promise<Buffer>}
+ */
+async function synthesizeCosyVoice(text, cosyVoiceId, speed) {
+  if (!DASHSCOPE_API_KEY) {
+    throw new Error('未配置 DASHSCOPE_API_KEY，无法使用 CosyVoice（请在 FC 环境变量配置，或设 TTS_PROVIDER=nls 回退 NLS）');
+  }
+  const chunks = splitText(text, 280);
+  const parts = [];
+  for (const c of chunks) {
+    const payload = buildCosyVoicePayload(c, cosyVoiceId, speed, COSYVOICE_MODEL);
+    const res = await httpsPostJson(DASHSCOPE_TTS_URL, payload, {
+      'Authorization': `Bearer ${DASHSCOPE_API_KEY}`,
+      'Content-Type': 'application/json',
+      'X-DashScope-DataInspection': 'disable',
+    });
+    parts.push(extractCosyVoiceAudio(res));
+  }
+  return Buffer.concat(parts);
 }
 
 function send(callback, status, headers, body, isBase64) {
@@ -378,7 +503,7 @@ module.exports.handler = async function (event, context, callback) {
     const reqVoice = (qs.voice || '').toLowerCase();
     const voice = KNOWN_EN_VOICES.includes(reqVoice) ? reqVoice : DEFAULT_VOICE;
 
-    // 语速：app 传 "±N%"（相对百分比），换算为阿里云 speech_rate
+    // 语速：app 传 "±N%"（相对百分比），换算为倍率 speed（供 CosyVoice 直接使用）
     let speed = 1;
     if (qs.rate) {
       const m = String(qs.rate).match(/-?\d+(\.\d+)?/);
@@ -387,12 +512,29 @@ module.exports.handler = async function (event, context, callback) {
     const speechRate = toAliyunRate(speed);
 
     try {
-      const chunks = splitText(text, 280);
-      const parts = [];
-      for (const c of chunks) {
-        parts.push(await synthesizeChunk(c, voice, speechRate));
+      let audio;
+      if (TTS_PROVIDER === 'cosyvoice') {
+        // 功能2：百炼 CosyVoice；映射缺失 cosyVoiceId 时回退默认音色。
+        const cosyVoiceId = COSYVOICE_VOICE_MAP[voice] || '';
+        try {
+          audio = await synthesizeCosyVoice(text, cosyVoiceId, speed);
+        } catch (cvErr) {
+          // 兜底回退 NLS（前提是已配置阿里云 AK / APPKEY），保证生产可用。
+          if (AK_ID && AK_SECRET && APPKEY) {
+            console.error('[CosyVoice 失败，回退 NLS]:', cvErr && cvErr.message);
+            const parts = [];
+            for (const c of splitText(text, 280)) parts.push(await synthesizeChunk(c, voice, speechRate));
+            audio = Buffer.concat(parts);
+          } else {
+            throw cvErr;
+          }
+        }
+      } else {
+        // 默认 / 兜底：阿里云 NLS（行为完全不变）。
+        const parts = [];
+        for (const c of splitText(text, 280)) parts.push(await synthesizeChunk(c, voice, speechRate));
+        audio = Buffer.concat(parts);
       }
-      const audio = Buffer.concat(parts);
       return send(
         callback,
         200,
@@ -480,3 +622,9 @@ module.exports.handler = async function (event, context, callback) {
     JSON.stringify({ error: 'Not Found', _diag: { rawPath: path, queryKeys: Object.keys(qs), envRegion: REGION, eventKeys: Object.keys(e), eventPreview: safeEvent } })
   );
 };
+
+// 导出仅供单测（架构 T9）：不依赖 FC handler 即可验证 CosyVoice 请求体 / 音频解析。
+module.exports.buildCosyVoicePayload = buildCosyVoicePayload;
+module.exports.extractCosyVoiceAudio = extractCosyVoiceAudio;
+module.exports.synthesizeCosyVoice = synthesizeCosyVoice;
+module.exports.__test = { TTS_PROVIDER, COSYVOICE_MODEL, COSYVOICE_VOICE_MAP, DASHSCOPE_TTS_URL };

@@ -7,6 +7,7 @@ import { DIFFICULTY_PRESETS, getContactDifficulty, setContactDifficulty } from '
 import { getEffectiveVoice, ALIYUN_VOICE_OPTIONS, setContactVoiceOverride } from '../data/voices';
 import { fingerprintOf, findCached, saveReview, clearReviews, normalizeReview } from '../services/reviewStore';
 import { searchImage, cleanQuery } from '../services/imageService';
+import { writeRaw } from '../services/messageStore';
 
 function getContactSpeed(cId) { return parseFloat(localStorage.getItem(`speakup_speed_${cId}`) || '0.75'); }
 function setContactSpeed(cId, v) { localStorage.setItem(`speakup_speed_${cId}`, v.toString()); }
@@ -113,11 +114,26 @@ export default function ChatView({ contact, messages, setMessages, apiKey, userA
       const allMessages = [...messages, userMsg]
         .filter(m => m.type !== 'image')
         .map(m => ({ role: m.role === 'user' ? 'user' : 'assistant', text: m.text }));
-      const reply = await chatWithAI(apiKey, systemPrompt, allMessages);
-      const aiMsg = { id: (Date.now() + 1).toString(), role: 'them', text: reply, timestamp: new Date() };
-      setMessages(p => [...p, aiMsg]);
+      // 功能1：让 AI 顺带输出该回复关键单词的音标+释义（wordDefs）。
+      // 兼容兜底：若解析失败，chatWithAI 返回纯文本，wordDefs 置空，不崩。
+      const reply = await chatWithAI(apiKey, systemPrompt, allMessages, { withWordDefs: true });
+      const aiText = typeof reply === 'string' ? reply : (reply?.text || '');
+      const wordDefs = (reply && typeof reply === 'object' && Array.isArray(reply.wordDefs)) ? reply.wordDefs : [];
+      const aiMsg = {
+        id: (Date.now() + 1).toString(),
+        role: 'them',
+        text: aiText,
+        timestamp: new Date(),
+        // 预生成音标缓存挂在 metadata，随消息持久化（功能1 离线可用）
+        metadata: wordDefs.length ? { wordDefs } : undefined,
+      };
+      setMessages(p => {
+        const next = [...p, aiMsg];
+        try { writeRaw(contact.id, next); } catch { /* 持久化失败不影响内存渲染 */ }
+        return next;
+      });
       setPlayingId(aiMsg.id);
-      speakText(reply, { voice: getEffectiveVoice(contact), rate: chatSpeed, mode: 'edgetts' }).finally(() => setPlayingId(null));
+      speakText(aiText, { voice: getEffectiveVoice(contact), rate: chatSpeed, mode: 'edgetts' }).finally(() => setPlayingId(null));
     } catch (err) {
       setMessages(p => [...p, { id: (Date.now() + 1).toString(), role: 'them', text: `[Error: ${err.message}]`, timestamp: new Date(), isError: true }]);
     } finally { setLoading(false); }
@@ -231,6 +247,19 @@ export default function ChatView({ contact, messages, setMessages, apiKey, userA
     speakText(text, { voice: getEffectiveVoice(contact), rate: chatSpeed, mode: 'edgetts' }).finally(() => setPlayingId(null));
   }, [playingId, contact, chatSpeed]);
 
+  // 功能1：用户消息首次点词 lazy 生成后，把 wordDefs 写回消息 metadata 并持久化。
+  const handleWordDefs = useCallback((msgId, defs) => {
+    setMessages(prev => {
+      const next = prev.map(m =>
+        m.id === msgId
+          ? { ...m, metadata: { ...(m.metadata || {}), wordDefs: defs } }
+          : m,
+      );
+      try { writeRaw(contact.id, next); } catch { /* 持久化失败不影响内存渲染 */ }
+      return next;
+    });
+  }, [setMessages, contact.id]);
+
   const formatDate = (d) => d?.toLocaleDateString([], { month: 'long', day: 'numeric' });
 
   return (
@@ -343,7 +372,7 @@ export default function ChatView({ contact, messages, setMessages, apiKey, userA
                 <img src={contact.avatar} alt={contact.name} className="w-full h-full object-cover" />
               </div>
             )}
-            <VoiceBubble message={msg} isPlaying={playingId === msg.id} onPlay={() => handlePlay(msg.id, msg.text)} apiKey={apiKey} />
+            <VoiceBubble message={msg} isPlaying={playingId === msg.id} onPlay={() => handlePlay(msg.id, msg.text)} apiKey={apiKey} onWordDefs={handleWordDefs} />
             {/* User avatar on the right */}
             {msg.role === 'user' && (
               <div className="w-7 h-7 rounded-full overflow-hidden flex-shrink-0 bg-[#1f2c3a] mb-0.5">

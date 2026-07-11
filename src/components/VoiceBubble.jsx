@@ -1,12 +1,20 @@
-import { useState } from 'react';
-import { translateText, defineWord } from '../services/gemini';
+import { useState, useEffect } from 'react';
+import { translateText } from '../services/gemini';
 import { playAudioBlob } from '../services/speech';
+import wordDefCache from '../services/wordDefCache';
+import WordDefBubble from './WordDefBubble';
 
-export default function VoiceBubble({ message, isPlaying, onPlay, apiKey }) {
+/**
+ * 单条消息气泡：波形播放 + 展开英文文本（可点词）+ 翻译。
+ *
+ * 功能1（点词看音标）：英文单词可点击 → 命中缓存优先（AI 预生成 / 已查过）→
+ * 未命中则 lazy 批量生成（wordDefCache.ensureDefs）→ 用 getBoundingClientRect
+ * 取坐标弹 WordDefBubble（单词 + 音标 + 中文释义 + 🔊）。
+ */
+export default function VoiceBubble({ message, isPlaying, onPlay, apiKey, onWordDefs }) {
   const [showText, setShowText] = useState(false);
-  const [selectedWord, setSelectedWord] = useState(null);
-  const [wordDef, setWordDef] = useState(null);
-  const [wordLoading, setWordLoading] = useState(false);
+  // 点词弹层状态：{ word, zh, phonetic, x, y }（x/y 为触发元素视口坐标）
+  const [bubble, setBubble] = useState(null);
   const [showTranslation, setShowTranslation] = useState(false);
   const [translatedText, setTranslatedText] = useState(null);
   const [translating, setTranslating] = useState(false);
@@ -54,11 +62,45 @@ export default function VoiceBubble({ message, isPlaying, onPlay, apiKey }) {
     ? Math.min(maxW, Math.max(minW, minW + ((wordCount - 2) / 18) * (maxW - minW)))
     : null; // AI messages stay at full width for readability
 
-  const handleWordClick = async (word) => {
-    if (selectedWord === word) { setSelectedWord(null); setWordDef(null); return; }
-    setSelectedWord(word); setWordDef(null); setWordLoading(true);
-    const result = await defineWord(apiKey, word);
-    setWordDef(result); setWordLoading(false);
+  // 用消息已预生成的 wordDefs 预热内存缓存（AI 回复场景，离线可用）。
+  useEffect(() => {
+    if (message && message.id && message.metadata && Array.isArray(message.metadata.wordDefs)) {
+      wordDefCache.primeFromMessage(message);
+    }
+  }, [message]);
+
+  // 点词：读缓存 → 未命中 lazy 生成 → 弹 WordDefBubble（含音标 + 🔊）。
+  const handleWordClick = async (word, e) => {
+    // 再次点击同一词 → 关闭气泡
+    if (bubble && bubble.word === word) { setBubble(null); return; }
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top;
+
+    // 1. 优先命中内存缓存（AI 预生成 / 已查过）。
+    let def = wordDefCache.get(message.id, word);
+
+    // 2. 未命中 → lazy 批量生成（用户消息），并把结果写回 metadata 持久化。
+    if (!def) {
+      try {
+        const defs = await wordDefCache.ensureDefs(apiKey, message.id, message.text, word);
+        def = defs.find(d => d.word.toLowerCase() === word.toLowerCase()) || null;
+        if (defs.length && typeof onWordDefs === 'function') {
+          onWordDefs(message.id, defs);
+        }
+      } catch {
+        def = null;
+      }
+    }
+
+    setBubble({
+      word,
+      zh: def?.zh || '',
+      phonetic: def?.phonetic || '',
+      x,
+      y,
+    });
   };
 
   const handleTranslationToggle = async () => {
@@ -141,7 +183,7 @@ export default function VoiceBubble({ message, isPlaying, onPlay, apiKey }) {
             onClick={(e) => {
               e.stopPropagation();
               setShowText(!showText);
-              if (showText) { setSelectedWord(null); setShowTranslation(false); }
+              if (showText) { setBubble(null); setShowTranslation(false); }
             }}
           >
             {showText ? '▲ Hide text' : '▼ Show text'}
@@ -160,25 +202,9 @@ export default function VoiceBubble({ message, isPlaying, onPlay, apiKey }) {
               if (clean.length < 3) return <span key={i}>{part}</span>;
               return (
                 <span key={i} className="cursor-pointer rounded px-0.5 hover:bg-[#2aabee]/15 transition-colors"
-                  onClick={() => handleWordClick(clean)}>{part}</span>
+                  onClick={(e) => handleWordClick(clean, e)}>{part}</span>
               );
             })}
-
-            {/* === L2: Word lookup === */}
-            {selectedWord && (
-              <div className="mt-2 p-2.5 bg-[#0e1621] rounded-xl border border-[#1c2a3a] text-xs fade-in">
-                <span className="font-semibold text-[#2aabee]">{selectedWord}</span>
-                {wordDef && <span className="text-[#707579] ml-1.5">{wordDef.phonetic}</span>}
-                {wordLoading && <span className="text-[#707579] ml-2">Looking up...</span>}
-                {wordDef && (
-                  <>
-                    <div className="text-[#aaaaaa] mt-1.5">{wordDef.meaning}</div>
-                    <div className="text-[#707579] mt-1 italic">&quot;{wordDef.example}&quot;</div>
-                  </>
-                )}
-                {!wordDef && !wordLoading && <div className="text-[#707579] mt-1">Tap to look up</div>}
-              </div>
-            )}
 
             {/* === L3: Translation === */}
             <div className="mt-2">
@@ -200,6 +226,18 @@ export default function VoiceBubble({ message, isPlaying, onPlay, apiKey }) {
           </span>
         </div>
       </div>
+
+      {/* === 点词弹层（功能1）：单词 + 音标 + 中文释义 + 🔊 === */}
+      {bubble && (
+        <WordDefBubble
+          word={bubble.word}
+          zh={bubble.zh}
+          phonetic={bubble.phonetic}
+          x={bubble.x}
+          y={bubble.y}
+          onClose={() => setBubble(null)}
+        />
+      )}
     </div>
   );
 }

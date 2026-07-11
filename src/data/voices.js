@@ -10,13 +10,17 @@
 /** 后端支持的阿里云英文发音人（必须与 aliyun-tts-proxy 的 KNOWN_EN_VOICES 保持一致） */
 export const KNOWN_EN_VOICES = ['cally', 'abby', 'andy', 'harry', 'eric'];
 
-/** 每个发音人的中文标签与性别 hint（供 UI 下拉与默认分配使用） */
+/**
+ * 每个发音人的中文标签与性别 hint（供 UI 下拉与默认分配使用）。
+ * cosyVoiceId 为功能2（CosyVoice 逼真 TTS）占位：初值 ''，由用户在百炼试听后
+ * 填入真实音色 id（与 aliyun-tts-proxy 的 COSYVOICE_VOICE_MAP 保持一致）。
+ */
 export const ALIYUN_VOICE_OPTIONS = [
-  { value: 'cally', label: 'Cally（女）', gender: 'female' },
-  { value: 'abby', label: 'Abby（女）', gender: 'female' },
-  { value: 'andy', label: 'Andy（男）', gender: 'male' },
-  { value: 'harry', label: 'Harry（男）', gender: 'male' },
-  { value: 'eric', label: 'Eric（男）', gender: 'male' },
+  { value: 'cally', label: 'Cally（女）', gender: 'female', cosyVoiceId: '' },
+  { value: 'abby', label: 'Abby（女）', gender: 'female', cosyVoiceId: '' },
+  { value: 'andy', label: 'Andy（男）', gender: 'male', cosyVoiceId: '' },
+  { value: 'harry', label: 'Harry（男）', gender: 'male', cosyVoiceId: '' },
+  { value: 'eric', label: 'Eric（男）', gender: 'male', cosyVoiceId: '' },
 ];
 
 const FEMALE_VOICES = KNOWN_EN_VOICES.filter(
@@ -129,3 +133,21 @@ export function getEffectiveVoice(contact) {
   if (override && KNOWN_EN_VOICES.includes(override)) return override;
   return assignDefaultVoice(contact || {});
 }
+
+/**
+ * 读取某阿里云发音人对应的 CosyVoice 音色 id（功能2）。
+ * 初值为占位 ''（由用户在百炼试听后填入真实 id）。缺失 / 未知返回 ''。
+ * @param {string} aliyunVoice 阿里云发音人名（如 'cally'）
+ * @returns {string}
+ */
+export function getCosyVoiceId(aliyunVoice) {
+  return ALIYUN_VOICE_OPTIONS.find((o) => o.value === aliyunVoice)?.cosyVoiceId || '';
+}
+
+/**
+ * CosyVoice 模型（百炼）。初值 cosyvoice-v3-flash；
+ * 若用户实际开通的是 v2，请在百炼确认后改为 cosyvoice-v2
+ * （v3 与 v2 音色名不通用，选定模型后需对应选音色）。
+ * @type {string}
+ */
+export const COSYVOICE_MODEL = 'cosyvoice-v3-flash';
