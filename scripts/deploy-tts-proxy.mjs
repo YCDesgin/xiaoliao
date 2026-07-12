@@ -43,7 +43,11 @@ const __dirname = path.dirname(__filename);
 // ----- 固定参数 / Fixed deployment parameters -------------------------------
 const REGION = 'cn-hangzhou'; // 地域（固定）Region (fixed)
 const FUNCTION_NAME = 'tts-proxy'; // 函数名（固定）Function name (fixed)
-const ENDPOINT = 'https://cn-hangzhou.fc.aliyuncs.com'; // FC 3.0 杭州 endpoint
+// 注意：@alicloud/openapi-client 的 Config.endpoint 只接受【主机名】，
+// SDK 会自行拼接 `https://`。若此处带上协议前缀会被拼成
+// `https://https://...` 导致 DNS 解析失败（EAI_AGAIN）。
+// NOTE: endpoint MUST be a bare hostname; the SDK adds the scheme itself.
+const ENDPOINT = 'cn-hangzhou.fc.aliyuncs.com'; // FC 3.0 杭州 endpoint (hostname only)
 // FC UpdateFunctionCode/UpdateFunction 的 zipFile(base64) 上限：50MB。
 // Max base64-encoded size allowed by FC for the code package.
 const MAX_BASE64_BYTES = 50 * 1024 * 1024;
