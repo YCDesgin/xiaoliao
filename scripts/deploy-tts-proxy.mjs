@@ -197,10 +197,10 @@ async function deploy(zipPath, zipBuffer) {
     accessKeySecret,
     regionId: REGION,
     endpoint: ENDPOINT,
-    // 上传 45MB base64 代码包时，SDK 默认 readTimeout=3000ms 会从 Azure→杭州超时。
-    // 调大读取/连接超时以容纳大包上传。
-    connectTimeout: 10000,   // 连接超时 10s
-    readTimeout: 60000,     // 读取（含上传）超时 60s
+    // 上传 45MB base64 代码包时，美国 runner→杭州 FC 中美链路高延迟、建连慢，
+    // SDK 默认 readTimeout=3000ms 会超时。大幅调大连接/读取超时以容纳慢链路。
+    connectTimeout: 60000,   // 连接超时 60s（TLS 握手可能 >10s）
+    readTimeout: 180000,    // 读取（含 45MB 上传）超时 180s
   });
   const client = new Client(config);
 
