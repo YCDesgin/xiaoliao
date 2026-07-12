@@ -64,16 +64,23 @@ let ttsMode = 'browser'; // 'browser' | 'edgetts'
 
 // --- Word 🔊 provider (功能2 联动) ---
 // 控制「点词朗读单个单词」走浏览器原生 speechSynthesis 还是云端 CosyVoice：
-//   'browser'  （默认）  → 浏览器 SpeechSynthesis（免费，但机械）
-//   'cosyvoice'           → 经 cloudTtsSpeak 走 FC 代理的 CosyVoice（更逼真）
-// 句子播放始终由 getCloudTtsUrl() 是否存在决定（与现有一致），与此开关无关。
+//   'auto'      （默认）  → 配置了云端 TTS 地址则走云端 CosyVoice，否则走浏览器原生
+//   'browser'             → 强制浏览器 SpeechSynthesis（兼容桌面用户）
+//   'cosyvoice'           → 总是经 cloudTtsSpeak 走 FC 代理的 CosyVoice（更逼真）
+// 与句子播放（speakText）保持一致：只要配置了可用的云端 TTS 地址即优先走云端，
+// 失败自动回退浏览器原生，绝不会静音。'auto' 为隐式默认值（不写入 localStorage，
+// 即「未设置」=== 'auto'），保证已有用户（无显式设置）自动获得与句子一致的云端路径。
 let wordTtsProvider =
-  (typeof localStorage !== 'undefined' && localStorage.getItem('speakup_word_tts_provider')) || 'browser';
+  (typeof localStorage !== 'undefined' && localStorage.getItem('speakup_word_tts_provider')) || 'auto';
 
 export function setWordTtsProvider(p) {
-  wordTtsProvider = p;
+  // 归一化为已知取值；未知值回退到 'auto'（默认），避免脏值导致静音。
+  const next = p === 'browser' || p === 'cosyvoice' || p === 'auto' ? p : 'auto';
+  wordTtsProvider = next;
   if (typeof localStorage !== 'undefined') {
-    if (p && p !== 'browser') localStorage.setItem('speakup_word_tts_provider', p);
+    // 'auto' 为隐式默认，不写入存储（「未设置」=== 'auto'），保持读写自洽；
+    // 其余取值（'browser' / 'cosyvoice'）均显式持久化，确保用户的显式选择可跨刷新保留。
+    if (next !== 'auto') localStorage.setItem('speakup_word_tts_provider', next);
     else localStorage.removeItem('speakup_word_tts_provider');
   }
 }
@@ -1010,10 +1017,14 @@ export function isSpeaking() {
  * Speak a single word. Used by the per-word "tap to define" bubble so learners
  * can hear the exact pronunciation of the word they tapped (功能1 🔊).
  *
- * 播放入口可配置（功能2 联动，架构 §3 / §7）：
- *   - provider === 'cosyvoice' 且已配置云端 TTS 地址 → 走 cloudTtsSpeak（CosyVoice，更逼真）；
- *     失败自动回退浏览器 speechSynthesis。
- *   - 其余（默认 'browser'）→ 浏览器原生 SpeechSynthesis。
+ * 播放入口可配置（功能2 联动，架构 §3 / §7），与句子朗读（speakText）保持一致：
+ *   - provider === 'auto'（默认）→ 配置了云端 TTS 地址则走 cloudTtsSpeak（CosyVoice，
+ *     更逼真），失败自动回退浏览器 speechSynthesis；未配置云端地址则直接走浏览器原生。
+ *   - provider === 'cosyvoice'    → 总是走 cloudTtsSpeak（CosyVoice）。
+ *   - provider === 'browser'      → 强制浏览器原生 SpeechSynthesis（兼容桌面用户）。
+ *
+ * 说明：云端路径不依赖 window.speechSynthesis（走 Web Audio），因此即便国产安卓的
+ * 原生 speechSynthesis 为「桩」（对象存在但 getVoices 为空、speak 静默），也能正常出声。
  *
  * @param {string} word - The word to speak
  * @param {object} opts - Optional { rate, lang, voice }
@@ -1024,8 +1035,13 @@ export function speakWord(word, opts = {}) {
   if (!text) return;
 
   const provider = getWordTtsProvider();
-  if (provider === 'cosyvoice' && getCloudTtsUrl() && typeof window !== 'undefined' && window.speechSynthesis) {
-    // 经云端 CosyVoice 朗读单词；任何失败都回退浏览器原生 TTS（绝不让点击无反应）。
+  // 与句子朗读一致：只要配置了云端 TTS 地址且未显式选「仅浏览器原生」
+  // （即 provider 为 'auto' 或 'cosyvoice'），优先走云端 CosyVoice；
+  // 任何失败（网络/服务/空音频）都自动回退浏览器原生 TTS，绝不会静音。
+  // 仅当 provider === 'browser' 时强制走原生引擎（兼容桌面用户）。
+  const useCloud = !!getCloudTtsUrl() && provider !== 'browser';
+  if (useCloud) {
+    // 复用与 speakText 完全一致的音色参数（'en-US-JennyNeural'），保证代理对音色名的处理一致。
     cloudTtsSpeak(text, 'en-US-JennyNeural', opts.rate || 0.8).catch(() => {
       speakBrowserWord(text, opts);
     });

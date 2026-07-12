@@ -79,15 +79,26 @@ afterEach(() => {
 });
 
 describe('Test A — getWordTtsProvider 默认与切换', () => {
-  it('默认返回 browser', () => {
-    expect(getWordTtsProvider()).toBe('browser');
+  // 注意：模块级变量 wordTtsProvider 在测试进程内是单例，afterEach 会把它重置为
+  // 'browser'。因此「默认返回 auto」必须作为 describe 内第一个用例、且不得调用
+  // setWordTtsProvider，以在本用例前无任何 afterEach 污染时断言冷启动默认值。
+  it('默认返回 auto（未设置时 === auto）', () => {
+    expect(getWordTtsProvider()).toBe('auto');
   });
 
-  it('setWordTtsProvider 切换并持久化；切回 browser 清除存储', () => {
+  it('setWordTtsProvider 切换并持久化；显式切回 browser 仍持久化', () => {
     setWordTtsProvider('cosyvoice');
     expect(getWordTtsProvider()).toBe('cosyvoice');
     expect(localStorage.getItem('speakup_word_tts_provider')).toBe('cosyvoice');
     setWordTtsProvider('browser');
+    expect(getWordTtsProvider()).toBe('browser');
+    // 新语义：显式 'browser' 显式持久化（旧逻辑会 removeItem，现已改为 setItem）。
+    expect(localStorage.getItem('speakup_word_tts_provider')).toBe('browser');
+  });
+
+  it('未知 provider 值归一化为 auto 且不写入存储', () => {
+    setWordTtsProvider('some-unknown-value');
+    expect(getWordTtsProvider()).toBe('auto');
     expect(localStorage.getItem('speakup_word_tts_provider')).toBeNull();
   });
 });
@@ -130,6 +141,43 @@ describe('Test C — cosyvoice 模式走云端 cloudTtsSpeak', () => {
     const synth = window.speechSynthesis;
     await speakWord('hello');
     expect(synth.speak).toHaveBeenCalledTimes(1);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('Test D — auto 模式主路径路由（本次修复核心）', () => {
+  // 复用了本文件已有的 installSpeechSynthesisStub / installAudioContextStub /
+  // setHostname / beforeEach / afterEach 结构，未重复定义辅助函数。
+
+  it('auto + 有云端地址 → 走云端 cloudTtsSpeak，不走原生 speechSynthesis', async () => {
+    setWordTtsProvider('auto'); // 默认 provider（'auto' 不写存储，等价于未设置）
+    setCloudTtsUrl('https://fc.example.com/tts');
+    const synth = window.speechSynthesis;
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      blob: () => Promise.resolve({ size: 8, arrayBuffer: () => Promise.resolve(new ArrayBuffer(8)) }),
+    }));
+
+    await speakWord('hello');
+    // 等待 cloudTtsSpeak 的异步 fetch 触发（成功路径不下发浏览器 TTS）
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0][0]).toContain('https://fc.example.com/tts');
+    expect(synth.speak).not.toHaveBeenCalled();
+  });
+
+  it('auto + 无云端地址 → 走原生 speechSynthesis，不打 fetch', async () => {
+    setWordTtsProvider('auto'); // 默认 provider
+    setCloudTtsUrl(''); // 无云端地址
+    const synth = window.speechSynthesis;
+
+    await speakWord('hello');
+
+    expect(synth.speak).toHaveBeenCalledTimes(1);
+    expect(synth.speak.mock.calls[0][0].text).toBe('hello');
     expect(fetch).not.toHaveBeenCalled();
   });
 });
