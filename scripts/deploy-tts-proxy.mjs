@@ -47,7 +47,10 @@ const FUNCTION_NAME = 'tts-proxy'; // 函数名（固定）Function name (fixed)
 // SDK 会自行拼接 `https://`。若此处带上协议前缀会被拼成
 // `https://https://...` 导致 DNS 解析失败（EAI_AGAIN）。
 // NOTE: endpoint MUST be a bare hostname; the SDK adds the scheme itself.
-const ENDPOINT = 'cn-hangzhou.fc.aliyuncs.com'; // FC 3.0 杭州 endpoint (hostname only)
+//
+// 主机名必须是 FC 3.0（API 2023-03-30）的接入域名 `fcv3.cn-hangzhou.aliyuncs.com`。
+// `cn-hangzhou.fc.aliyuncs.com` 是 FC 2.0 的格式，公网无法解析（ENOTFOUND）。
+const ENDPOINT = 'fcv3.cn-hangzhou.aliyuncs.com'; // FC 3.0 杭州 endpoint (hostname only)
 // FC UpdateFunctionCode/UpdateFunction 的 zipFile(base64) 上限：50MB。
 // Max base64-encoded size allowed by FC for the code package.
 const MAX_BASE64_BYTES = 50 * 1024 * 1024;
