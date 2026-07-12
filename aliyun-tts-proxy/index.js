@@ -233,27 +233,33 @@ let resolvedFfmpegPath = null;
 function ensureFfmpegBinary() {
   if (resolvedFfmpegPath) return resolvedFfmpegPath;
   const rawPath = require('ffmpeg-static');
+  // 1) 已具备执行权限：直接用
   try {
     fs.accessSync(rawPath, fs.constants.X_OK);
     resolvedFfmpegPath = rawPath;
     return rawPath;
-  } catch {
-    // 没有执行权限：尝试原地 chmod +x
+  } catch {}
+  // 2) 原地 chmod +x（/code 可写时生效）
+  try {
+    fs.chmodSync(rawPath, 0o755);
+    fs.accessSync(rawPath, fs.constants.X_OK);
+    resolvedFfmpegPath = rawPath;
+    return rawPath;
+  } catch {}
+  // 3) /code 只读：复制到「可写且可执行」的候选目录再 chmod +x。
+  //    FC 不同实例挂载策略不同（部分实例 /tmp 为 noexec），故依次尝试多个目录。
+  for (const dir of ['/tmp', '/home']) {
     try {
-      fs.chmodSync(rawPath, 0o755);
-      fs.accessSync(rawPath, fs.constants.X_OK);
-      resolvedFfmpegPath = rawPath;
-      return rawPath;
-    } catch {
-      // /code 目录只读：复制到 /tmp 后再 chmod +x
-      const tmpPath = '/tmp/ffmpeg-' + crypto.randomBytes(4).toString('hex');
+      const tmpPath = dir + '/ffmpeg-' + crypto.randomBytes(4).toString('hex');
       fs.copyFileSync(rawPath, tmpPath);
       fs.chmodSync(tmpPath, 0o755);
       fs.accessSync(tmpPath, fs.constants.X_OK);
       resolvedFfmpegPath = tmpPath;
       return tmpPath;
-    }
+    } catch {}
   }
+  // 4) 全部失败：退回原始路径，让 spawn 抛出原始错误（便于排查）
+  return rawPath;
 }
 
 // --- ffmpeg 转码：把任意前端音频（opus/webm 等）转成 NLS 要求的 16k/16bit/mono WAV ---
