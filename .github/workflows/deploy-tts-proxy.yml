@@ -1,29 +1,28 @@
 name: Deploy TTS Proxy to Aliyun FC
 
 # 自动部署「虾聊」阿里云 TTS/ASR 代理（aliyun-tts-proxy）到阿里云函数计算（FC 3.0）。
-# 触发条件：push 到 main，且以下路径之一有改动：
-#   - aliyun-tts-proxy/**            （代理业务代码 / 依赖）
-#   - scripts/deploy-tts-proxy.mjs   （部署脚本本身）
-#   - .github/workflows/deploy-tts-proxy.yml（本工作流）
-# 流程：在 ubuntu 上 npm ci 装好「Linux 版 ffmpeg-static + FC SDK」→ 把整个代理目录打成 zip
-#       （含 node_modules 里的 Linux ffmpeg）→ 用官方 SDK 把 zip(base64) 直传到 FC UpdateFunctionCode。
-# 凭据：仓库 Settings → Secrets 中配置 ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET。
+#
+# ⚠️ 重要：GitHub 官方托管 runner（美国 Azure）无法直连阿里云杭州端点
+# （中美跨境链路被丢弃，实测 connect 120s 超时），因此本工作流【不能】在
+# 普通 ubuntu-latest runner 上自动运行。
+# 现改为：仅手动触发（workflow_dispatch）+ 需一个位于中国的自托管 runner
+# （label: aliyun-cn）。在配好自托管 runner 之前，请用本机脚本部署：
+#   powershell -ExecutionPolicy Bypass -File scripts/deploy-local.ps1
+#
+# 凭据：通过环境变量 ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET 注入
+#       （本机从仓库根 .env.local 读取，该文件已被 .gitignore 忽略）。
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'aliyun-tts-proxy/**'
-      - 'scripts/deploy-tts-proxy.mjs'
-      - '.github/workflows/deploy-tts-proxy.yml'
+  workflow_dispatch:
 
-# 只需要读取仓库内容；部署凭据通过 secrets 注入，无需额外权限。
+# 只读取仓库内容；部署凭据通过 env 注入，无需额外权限。
 permissions:
   contents: read
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    # 必须是中国境内的自托管 runner，否则无法直连阿里云杭州。
+    runs-on: [self-hosted, aliyun-cn]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,23 +32,13 @@ jobs:
         with:
           node-version: '22'
 
-      # 在 Linux 沙箱中安装依赖：
-      #   - ffmpeg-static（会拉取 Linux 版二进制，随 zip 一起上传到 FC，FC 侧 node 才能调用 ffmpeg）
-      #   - @alicloud/fc20230330 / @alicloud/openapi-client（部署脚本依赖，装在 aliyun-tts-proxy/node_modules）
-      # 注意：脚本 scripts/deploy-tts-proxy.mjs 通过 createRequire 从 aliyun-tts-proxy 目录解析这两个 SDK，
-      #       因此 SDK 必须装在该子目录下（而非仓库根）。
       - name: Install FC proxy deps (Linux ffmpeg-static + deploy SDK)
         working-directory: aliyun-tts-proxy
         run: npm ci
 
-      # 把整个代理目录打成 zip，落到仓库根（默认的 run cwd 就是仓库根）。
-      # node_modules 一并打包，确保 FC 侧拥有 Linux ffmpeg 二进制。
       - name: Package proxy directory into zip (incl. Linux ffmpeg in node_modules)
         run: cd aliyun-tts-proxy && zip -r ../tts-proxy-deploy.zip . -x '*.git*'
 
-      # 调用部署脚本：读取 tts-proxy-deploy.zip → base64 → 调 FC UpdateFunctionCode 上传到函数 tts-proxy。
-      # 脚本从环境变量读取 AK；凭据来自仓库 Secrets，不落盘、不进日志。
-      # 若 base64 超限（>50MB）或 SDK/网络报错，脚本会以非零退出码失败并给出明确报错。
       - name: Deploy to Aliyun FC (UpdateFunctionCode)
         env:
           ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_ID }}

@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# 本地部署产物 / 密钥（手动部署用，勿提交）
+tts-proxy-deploy.zip
+.env.local
