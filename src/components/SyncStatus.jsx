@@ -4,7 +4,8 @@ import { useSyncStatus } from '../hooks/useSyncStatus';
 // 以底部居中的浮层呈现，避免遮挡聊天内容（与输入框保持间距）。
 export default function SyncStatus({ contactId, onSynced }) {
   const { state, error, lastSyncAt, retry } = useSyncStatus();
-  if (state === 'idle') return null;
+  // 仅在同步异常时显示底部浮层标记；正常 / 进行中 / 空闲均不显示。
+  if (state === 'idle' || state === 'syncing' || state === 'synced') return null;
 
   const onRetry = () => {
     if (!contactId) return;
