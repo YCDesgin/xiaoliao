@@ -16,6 +16,7 @@ const http = require('http');
 const crypto = require('crypto');
 const { URLSearchParams } = require('url');
 const { spawn } = require('child_process');
+const fs = require('fs');
 // ffmpeg-static 自带预编译二进制：FC Node.js 运行时安装依赖后可直接 require 拿到二进制路径，
 // 无需系统 apt / 额外安装。用于把前端上传的 opus/webm 音频转码成 NLS 要求的 16k/16bit/mono WAV。
 // 注意：改为「惰性 require」，只在真正用到 ASR 转码时才加载，避免 ffmpeg-static 缺失时
@@ -227,6 +228,34 @@ function httpsPostBuffer(urlStr, bodyBuffer, contentType, timeoutMs = 30000, ext
   });
 }
 
+// --- 确保 ffmpeg 二进制可执行（FC 从 Windows 打包的 zip 解压后可能丢失 +x 权限）---
+let resolvedFfmpegPath = null;
+function ensureFfmpegBinary() {
+  if (resolvedFfmpegPath) return resolvedFfmpegPath;
+  const rawPath = require('ffmpeg-static');
+  try {
+    fs.accessSync(rawPath, fs.constants.X_OK);
+    resolvedFfmpegPath = rawPath;
+    return rawPath;
+  } catch {
+    // 没有执行权限：尝试原地 chmod +x
+    try {
+      fs.chmodSync(rawPath, 0o755);
+      fs.accessSync(rawPath, fs.constants.X_OK);
+      resolvedFfmpegPath = rawPath;
+      return rawPath;
+    } catch {
+      // /code 目录只读：复制到 /tmp 后再 chmod +x
+      const tmpPath = '/tmp/ffmpeg-' + crypto.randomBytes(4).toString('hex');
+      fs.copyFileSync(rawPath, tmpPath);
+      fs.chmodSync(tmpPath, 0o755);
+      fs.accessSync(tmpPath, fs.constants.X_OK);
+      resolvedFfmpegPath = tmpPath;
+      return tmpPath;
+    }
+  }
+}
+
 // --- ffmpeg 转码：把任意前端音频（opus/webm 等）转成 NLS 要求的 16k/16bit/mono WAV ---
 // 前端不再做解码/重采样，原样上传 opus/webm；后端用 ffmpeg-static 转码后再送阿里云。
 function detectFfmpegFormat(buf) {
@@ -241,7 +270,8 @@ function transcodeToWav(inputBuffer, forcedFmt = '') {
     let ffmpeg;
     try {
       // 惰性加载：仅 ASR 转码路径需要，缺失时不阻断 TTS / CosyVoice 冷启动。
-      ffmpeg = require('ffmpeg-static');
+      // 同时确保二进制有执行权限（Windows 打包的 zip 会丢失 +x）。
+      ffmpeg = ensureFfmpegBinary();
     } catch {
       reject(new Error('ffmpeg 不可用：请在函数目录执行 npm install ffmpeg-static 后重新部署'));
       return;
